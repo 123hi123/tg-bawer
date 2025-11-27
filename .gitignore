@@ -1,0 +1,34 @@
+# 編譯產物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+gemini-manga-bot
+
+# 測試
+*.test
+*.out
+coverage.html
+
+# 依賴
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 環境變數
+.env
+
+# 資料目錄
+data/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db

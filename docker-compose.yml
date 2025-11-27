@@ -1,0 +1,11 @@
+services:
+  gemini-manga-bot:
+    build: .
+    container_name: gemini-manga-bot
+    restart: unless-stopped
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - BOT_TOKEN=${BOT_TOKEN}
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
