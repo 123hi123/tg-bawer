@@ -61,9 +61,20 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// 處理圖片
-	if msg.Photo != nil && len(msg.Photo) > 0 {
-		b.handlePhoto(msg)
+	// 圖片單獨傳入時不做任何處理
+	if msg.Photo != nil && len(msg.Photo) > 0 && msg.Caption == "" {
+		return
+	}
+
+	// 處理文字訊息（非指令）
+	if msg.Text != "" {
+		b.handleTextMessage(msg)
+		return
+	}
+
+	// 處理帶有 caption 的圖片
+	if msg.Photo != nil && len(msg.Photo) > 0 && msg.Caption != "" {
+		b.handleTextMessage(msg)
 		return
 	}
 }
@@ -92,15 +103,21 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 	text := `🎨 *Gemini 漫畫翻譯 Bot*
 
-歡迎使用！直接傳送漫畫圖片即可自動翻譯。
+歡迎使用！直接傳送文字即可生成翻譯圖片。
 
 *基本用法：*
-• 直接傳圖片 → 使用預設 Prompt 翻譯
-• 圖片 + 文字 → 使用該文字作為 Prompt
+• 直接輸入文字 → 使用預設 Prompt 生成圖片
+• 回覆圖片並輸入文字 → 將圖片作為上下文一起處理
 
-*圖片參數（在圖片說明中使用）：*
-• ` + "`/s 4K`" + ` → 設定畫質（1K/2K/4K）
-• ` + "`/v`" + ` → 同時生成語音朗讀
+*參數設定（用 @ 符號，前後需有空格）：*
+• ` + "`@1:1`" + ` ` + "`@16:9`" + ` ` + "`@9:16`" + ` → 設定比例
+• ` + "`@4K`" + ` ` + "`@2K`" + ` ` + "`@1K`" + ` → 設定畫質
+
+*支援的比例：*
+` + "`@1:1`" + ` ` + "`@2:3`" + ` ` + "`@3:2`" + ` ` + "`@3:4`" + ` ` + "`@4:3`" + ` ` + "`@4:5`" + ` ` + "`@5:4`" + ` ` + "`@9:16`" + ` ` + "`@16:9`" + ` ` + "`@21:9`" + `
+
+*範例：*
+` + "`翻譯這張漫畫 @16:9 @4K`" + `
 
 *指令：*
 /save <名稱> <prompt> - 保存 Prompt
@@ -108,6 +125,7 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 /history - 查看使用歷史
 /setdefault - 設定預設 Prompt
 /settings - 設定預設畫質
+/delete - 刪除已保存的 Prompt
 /help - 顯示幫助`
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
@@ -404,6 +422,286 @@ func (b *Bot) callbackDelete(callback *tgbotapi.CallbackQuery, idStr string) {
 	b.cmdDelete(callback.Message)
 }
 
+// 支援的比例列表
+var supportedRatios = map[string]bool{
+	"1:1": true, "2:3": true, "3:2": true,
+	"3:4": true, "4:3": true, "4:5": true,
+	"5:4": true, "9:16": true, "16:9": true,
+	"21:9": true,
+}
+
+// 支援的畫質列表
+var supportedQualities = map[string]string{
+	"1k": "1K", "2k": "2K", "4k": "4K",
+	"1K": "1K", "2K": "2K", "4K": "4K",
+}
+
+// ParsedParams 解析後的參數
+type ParsedParams struct {
+	Prompt      string
+	AspectRatio string // 如果沒指定則為空
+	Quality     string // 如果沒指定則為空
+	RatioError  string // 比例錯誤訊息
+	QualityError string // 畫質錯誤訊息
+}
+
+// parseTextParams 解析文字中的 @ 參數
+func parseTextParams(text string) *ParsedParams {
+	params := &ParsedParams{}
+	
+	// 用空格分割
+	parts := strings.Fields(text)
+	var promptParts []string
+	
+	for _, part := range parts {
+		if strings.HasPrefix(part, "@") {
+			value := strings.TrimPrefix(part, "@")
+			
+			// 檢查是否為畫質
+			if q, ok := supportedQualities[value]; ok {
+				params.Quality = q
+				continue
+			}
+			
+			// 檢查是否為比例
+			if supportedRatios[value] {
+				params.AspectRatio = value
+				continue
+			}
+			
+			// 檢查是否為無效的畫質格式 (數字+K)
+			upperValue := strings.ToUpper(value)
+			if strings.HasSuffix(upperValue, "K") && len(value) > 1 {
+				params.QualityError = value
+				continue
+			}
+			
+			// 檢查是否為無效的比例格式 (包含冒號)
+			if strings.Contains(value, ":") {
+				params.RatioError = value
+				continue
+			}
+			
+			// 其他情況視為 prompt 的一部分
+			promptParts = append(promptParts, part)
+		} else {
+			promptParts = append(promptParts, part)
+		}
+	}
+	
+	params.Prompt = strings.Join(promptParts, " ")
+	return params
+}
+
+// truncateError 截斷錯誤訊息並折疊顯示
+func truncateError(err string) string {
+	const maxLen = 200
+	if len(err) > maxLen {
+		return err[:maxLen] + "...\n(錯誤訊息過長已截斷)"
+	}
+	return err
+}
+
+func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
+	// 取得文字內容
+	text := msg.Text
+	if text == "" {
+		text = msg.Caption
+	}
+	
+	// 如果是斜線開頭但不是指令（例如不正確的格式），跳過
+	if strings.HasPrefix(text, "/") {
+		return
+	}
+	
+	// 解析參數
+	params := parseTextParams(text)
+	
+	// 檢查參數錯誤
+	if params.RatioError != "" || params.QualityError != "" {
+		errorText := "❌ *參數錯誤*\n\n"
+		
+		if params.RatioError != "" {
+			errorText += fmt.Sprintf("無效的比例：`%s`\n", params.RatioError)
+			errorText += "支援的比例：`@1:1` `@2:3` `@3:2` `@3:4` `@4:3` `@4:5` `@5:4` `@9:16` `@16:9` `@21:9`\n\n"
+		}
+		
+		if params.QualityError != "" {
+			errorText += fmt.Sprintf("無效的畫質：`%s`\n", params.QualityError)
+			errorText += "支援的畫質：`@1K` `@2K` `@4K`\n\n"
+		}
+		
+		errorText += "*正確範例：*\n`翻譯這張漫畫 @16:9 @4K`"
+		
+		reply := tgbotapi.NewMessage(msg.Chat.ID, errorText)
+		reply.ParseMode = "Markdown"
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+		return
+	}
+	
+	// 收集圖片
+	var images []imageData
+	
+	// 檢查當前訊息是否有圖片
+	if msg.Photo != nil && len(msg.Photo) > 0 {
+		photo := msg.Photo[len(msg.Photo)-1]
+		images = append(images, imageData{FileID: photo.FileID})
+	}
+	
+	// 檢查回覆的訊息是否有圖片
+	if msg.ReplyToMessage != nil {
+		replyMsg := msg.ReplyToMessage
+		
+		// 回覆的訊息是圖片
+		if replyMsg.Photo != nil && len(replyMsg.Photo) > 0 {
+			photo := replyMsg.Photo[len(replyMsg.Photo)-1]
+			images = append(images, imageData{FileID: photo.FileID})
+		}
+		
+		// 回覆的訊息是文件（可能是圖片檔案）
+		if replyMsg.Document != nil {
+			mimeType := replyMsg.Document.MimeType
+			if strings.HasPrefix(mimeType, "image/") {
+				images = append(images, imageData{FileID: replyMsg.Document.FileID})
+			}
+		}
+	}
+	
+	// 取得預設設定
+	quality := params.Quality
+	if quality == "" {
+		quality, _ = b.db.GetUserSettings(msg.From.ID)
+		if quality == "" {
+			quality = "2K"
+		}
+	}
+	
+	aspectRatio := params.AspectRatio
+	
+	// 決定使用的 Prompt
+	prompt := params.Prompt
+	if prompt == "" {
+		// 檢查是否有使用者設定的預設
+		defaultPrompt, _ := b.db.GetDefaultPrompt(msg.From.ID)
+		if defaultPrompt != nil {
+			prompt = defaultPrompt.Prompt
+		} else {
+			prompt = config.DefaultPrompt
+		}
+	} else {
+		// 記錄到歷史
+		b.db.AddToHistory(msg.From.ID, prompt)
+	}
+	
+	// 顯示參數資訊
+	ratioDisplay := "Auto"
+	if aspectRatio != "" {
+		ratioDisplay = aspectRatio
+	}
+	
+	qualityDisplay := quality
+	if params.Quality == "" {
+		qualityDisplay = quality + " (預設)"
+	}
+	
+	// 發送處理中訊息（回覆使用者的訊息）
+	statusText := fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		ratioDisplay, qualityDisplay, len(images))
+	
+	processingMsg, err := b.sendReplyMessage(msg, statusText)
+	if err != nil {
+		return
+	}
+	
+	// 下載所有圖片
+	var downloadedImages []gemini.DownloadedImage
+	for i, img := range images {
+		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 下載圖片 %d/%d...",
+			ratioDisplay, qualityDisplay, i+1, len(images)))
+		
+		fileConfig := tgbotapi.FileConfig{FileID: img.FileID}
+		file, err := b.api.GetFile(fileConfig)
+		if err != nil {
+			b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>\n\n無法取得圖片 %d\n\n<blockquote expandable>%s</blockquote>",
+				i+1, truncateError(err.Error())))
+			return
+		}
+		
+		data, mimeType, err := b.downloadFile(file.FilePath)
+		if err != nil {
+			b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>\n\n下載圖片 %d 失敗\n\n<blockquote expandable>%s</blockquote>",
+				i+1, truncateError(err.Error())))
+			return
+		}
+		
+		downloadedImages = append(downloadedImages, gemini.DownloadedImage{
+			Data:     data,
+			MimeType: mimeType,
+		})
+	}
+	
+	// 如果有圖片，計算比例（如果使用者沒指定）
+	if len(downloadedImages) > 0 && aspectRatio == "" {
+		imageInfo, err := gemini.GetImageInfo(downloadedImages[0].Data)
+		if err == nil && imageInfo.AspectRatio != "" {
+			aspectRatio = imageInfo.AspectRatio
+			ratioDisplay = aspectRatio + " (自動偵測)"
+		}
+	}
+	
+	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		ratioDisplay, qualityDisplay, len(images)))
+	
+	// 重試邏輯：當前畫質三次 → 1K 三次
+	var result *gemini.ImageResult
+	qualities := []string{quality, quality, quality, "1K", "1K", "1K"}
+	if quality == "1K" {
+		qualities = []string{"1K", "1K", "1K", "1K", "1K", "1K"}
+	}
+	
+	ctx := context.Background()
+	var lastErr error
+	
+	for i, q := range qualities {
+		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (嘗試 %d/6，畫質 %s)\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+			i+1, q, ratioDisplay, qualityDisplay, len(images)))
+		
+		if len(downloadedImages) > 0 {
+			// 有圖片的情況
+			result, lastErr = b.gemini.GenerateImageWithContext(ctx, downloadedImages, prompt, q, aspectRatio)
+		} else {
+			// 純文字生成
+			result, lastErr = b.gemini.GenerateImageFromText(ctx, prompt, q, aspectRatio)
+		}
+		
+		if lastErr == nil {
+			break
+		}
+		
+		log.Printf("Attempt %d failed: %v", i+1, lastErr)
+		time.Sleep(time.Second * 2)
+	}
+	
+	if lastErr != nil {
+		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（已重試 6 次）\n\n<blockquote expandable>%s</blockquote>",
+			truncateError(lastErr.Error())))
+		return
+	}
+	
+	// 刪除處理中訊息
+	b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, processingMsg.MessageID))
+	
+	// 發送結果圖片（回覆使用者的訊息）
+	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "generated.png", Bytes: result.ImageData})
+	photoMsg.ReplyToMessageID = msg.MessageID
+	b.api.Send(photoMsg)
+}
+
+type imageData struct {
+	FileID string
+}
+
 func (b *Bot) handlePhoto(msg *tgbotapi.Message) {
 	// 解析參數
 	caption := msg.Caption
@@ -477,6 +775,20 @@ func (b *Bot) handlePhoto(msg *tgbotapi.Message) {
 		return
 	}
 
+	// 取得圖片資訊並計算比例
+	imageInfo, err := gemini.GetImageInfo(imageData)
+	if err != nil {
+		log.Printf("無法解析圖片資訊: %v", err)
+		imageInfo = &gemini.ImageInfo{AspectRatio: ""} // 讓模型自動決定
+	}
+
+	// 顯示圖片資訊
+	ratioInfo := "自動"
+	if imageInfo.AspectRatio != "" {
+		ratioInfo = imageInfo.AspectRatio
+	}
+	b.updateMessage(processingMsg, fmt.Sprintf("⏳ 處理中...\n📐 圖片: %dx%d\n📏 比例: %s", imageInfo.Width, imageInfo.Height, ratioInfo))
+
 	// 重試邏輯：2K 三次 → 1K 三次
 	var result *gemini.ImageResult
 	qualities := []string{quality, quality, quality, "1K", "1K", "1K"}
@@ -488,9 +800,9 @@ func (b *Bot) handlePhoto(msg *tgbotapi.Message) {
 	var lastErr error
 
 	for i, q := range qualities {
-		b.updateMessage(processingMsg, fmt.Sprintf("⏳ 處理中... (嘗試 %d/6，畫質 %s)", i+1, q))
+		b.updateMessage(processingMsg, fmt.Sprintf("⏳ 處理中... (嘗試 %d/6，畫質 %s)\n📐 圖片: %dx%d\n📏 比例: %s", i+1, q, imageInfo.Width, imageInfo.Height, ratioInfo))
 
-		result, lastErr = b.gemini.GenerateImage(ctx, imageData, mimeType, prompt, q)
+		result, lastErr = b.gemini.GenerateImage(ctx, imageData, mimeType, prompt, q, imageInfo.AspectRatio)
 		if lastErr == nil {
 			break
 		}
@@ -562,4 +874,23 @@ func (b *Bot) downloadFile(filePath string) ([]byte, string, error) {
 func (b *Bot) updateMessage(msg tgbotapi.Message, text string) {
 	edit := tgbotapi.NewEditMessageText(msg.Chat.ID, msg.MessageID, text)
 	b.api.Send(edit)
+}
+
+func (b *Bot) updateMessageMarkdown(msg tgbotapi.Message, text string) {
+	edit := tgbotapi.NewEditMessageText(msg.Chat.ID, msg.MessageID, text)
+	edit.ParseMode = "Markdown"
+	b.api.Send(edit)
+}
+
+func (b *Bot) updateMessageHTML(msg tgbotapi.Message, text string) {
+	edit := tgbotapi.NewEditMessageText(msg.Chat.ID, msg.MessageID, text)
+	edit.ParseMode = "HTML"
+	b.api.Send(edit)
+}
+
+func (b *Bot) sendReplyMessage(msg *tgbotapi.Message, text string) (tgbotapi.Message, error) {
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "Markdown"
+	reply.ReplyToMessageID = msg.MessageID
+	return b.api.Send(reply)
 }

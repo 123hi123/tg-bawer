@@ -14,6 +14,7 @@ coverage.html
 # 依賴
 vendor/
 
+
 # IDE
 .idea/
 .vscode/
@@ -32,3 +33,5 @@ data/
 
 # Windows
 Thumbs.db
+# person see file
+README copy.md

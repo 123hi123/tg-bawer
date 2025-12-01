@@ -6,7 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
+	"math"
 	"net/http"
 	"time"
 )
@@ -25,6 +29,29 @@ type TTSResult struct {
 	AudioData []byte
 }
 
+type ImageInfo struct {
+	Width       int
+	Height      int
+	AspectRatio string // 匹配的比例，如 "16:9"，或空字串表示讓模型自動決定
+}
+
+// 支援的比例列表
+var supportedRatios = []struct {
+	Name  string
+	Ratio float64
+}{
+	{"1:1", 1.0},
+	{"2:3", 2.0 / 3.0},
+	{"3:2", 3.0 / 2.0},
+	{"3:4", 3.0 / 4.0},
+	{"4:3", 4.0 / 3.0},
+	{"4:5", 4.0 / 5.0},
+	{"5:4", 5.0 / 4.0},
+	{"9:16", 9.0 / 16.0},
+	{"16:9", 16.0 / 9.0},
+	{"21:9", 21.0 / 9.0},
+}
+
 func NewClient(apiKey string) *Client {
 	return &Client{
 		apiKey: apiKey,
@@ -34,9 +61,58 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
+// GetImageInfo 取得圖片資訊並計算最接近的支援比例
+func GetImageInfo(imageData []byte) (*ImageInfo, error) {
+	reader := bytes.NewReader(imageData)
+	config, _, err := image.DecodeConfig(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	info := &ImageInfo{
+		Width:  config.Width,
+		Height: config.Height,
+	}
+
+	// 計算實際比例
+	actualRatio := float64(config.Width) / float64(config.Height)
+
+	// 找最接近的支援比例
+	minDiff := math.MaxFloat64
+	matchedRatio := ""
+
+	for _, r := range supportedRatios {
+		diff := math.Abs(actualRatio - r.Ratio)
+		if diff < minDiff {
+			minDiff = diff
+			matchedRatio = r.Name
+		}
+	}
+
+	// 如果差異太大（超過 10%），就讓模型自動決定
+	threshold := 0.1
+	if minDiff/actualRatio > threshold {
+		info.AspectRatio = "" // 讓模型自動決定
+	} else {
+		info.AspectRatio = matchedRatio
+	}
+
+	return info, nil
+}
+
 // GenerateImage 生成翻譯後的漫畫圖片
-func (c *Client) GenerateImage(ctx context.Context, imageData []byte, mimeType, prompt, quality string) (*ImageResult, error) {
+func (c *Client) GenerateImage(ctx context.Context, imageData []byte, mimeType, prompt, quality, aspectRatio string) (*ImageResult, error) {
 	imageBase64 := base64.StdEncoding.EncodeToString(imageData)
+
+	// 建立 imageConfig
+	imageConfig := map[string]interface{}{
+		"imageSize": quality,
+	}
+
+	// 只有當 aspectRatio 不為空時才設定
+	if aspectRatio != "" {
+		imageConfig["aspectRatio"] = aspectRatio
+	}
 
 	requestBody := map[string]interface{}{
 		"contents": []map[string]interface{}{
@@ -54,9 +130,7 @@ func (c *Client) GenerateImage(ctx context.Context, imageData []byte, mimeType, 
 		},
 		"generationConfig": map[string]interface{}{
 			"responseModalities": []string{"IMAGE"},
-			"imageConfig": map[string]interface{}{
-				"imageSize": quality,
-			},
+			"imageConfig":        imageConfig,
 		},
 		"safetySettings": []map[string]interface{}{
 			{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
@@ -66,6 +140,165 @@ func (c *Client) GenerateImage(ctx context.Context, imageData []byte, mimeType, 
 		},
 	}
 
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key=%s", c.apiKey)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("API error: %s", string(body))
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	// 解析回應取得圖片
+	candidates, ok := result["candidates"].([]interface{})
+	if !ok || len(candidates) == 0 {
+		return nil, fmt.Errorf("no candidates in response")
+	}
+
+	candidate := candidates[0].(map[string]interface{})
+	content, ok := candidate["content"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("no content in candidate")
+	}
+
+	parts, ok := content["parts"].([]interface{})
+	if !ok || len(parts) == 0 {
+		return nil, fmt.Errorf("no parts in content")
+	}
+
+	for _, part := range parts {
+		partMap := part.(map[string]interface{})
+		if inlineData, ok := partMap["inlineData"].(map[string]interface{}); ok {
+			if dataStr, ok := inlineData["data"].(string); ok {
+				imageBytes, err := base64.StdEncoding.DecodeString(dataStr)
+				if err != nil {
+					return nil, err
+				}
+				return &ImageResult{ImageData: imageBytes}, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no image data in response")
+}
+
+// DownloadedImage 下載的圖片資料
+type DownloadedImage struct {
+	Data     []byte
+	MimeType string
+}
+
+// GenerateImageWithContext 使用多張圖片作為上下文生成圖片
+func (c *Client) GenerateImageWithContext(ctx context.Context, images []DownloadedImage, prompt, quality, aspectRatio string) (*ImageResult, error) {
+	// 建立 parts
+	var parts []map[string]interface{}
+	
+	// 先加入文字 prompt
+	parts = append(parts, map[string]interface{}{"text": prompt})
+	
+	// 加入所有圖片
+	for _, img := range images {
+		imageBase64 := base64.StdEncoding.EncodeToString(img.Data)
+		parts = append(parts, map[string]interface{}{
+			"inline_data": map[string]string{
+				"mime_type": img.MimeType,
+				"data":      imageBase64,
+			},
+		})
+	}
+
+	// 建立 imageConfig
+	imageConfig := map[string]interface{}{
+		"imageSize": quality,
+	}
+
+	// 只有當 aspectRatio 不為空時才設定
+	if aspectRatio != "" {
+		imageConfig["aspectRatio"] = aspectRatio
+	}
+
+	requestBody := map[string]interface{}{
+		"contents": []map[string]interface{}{
+			{
+				"parts": parts,
+			},
+		},
+		"generationConfig": map[string]interface{}{
+			"responseModalities": []string{"IMAGE"},
+			"imageConfig":        imageConfig,
+		},
+		"safetySettings": []map[string]interface{}{
+			{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+			{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+			{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+			{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+		},
+	}
+
+	return c.sendImageRequest(ctx, requestBody)
+}
+
+// GenerateImageFromText 純文字生成圖片
+func (c *Client) GenerateImageFromText(ctx context.Context, prompt, quality, aspectRatio string) (*ImageResult, error) {
+	// 建立 imageConfig
+	imageConfig := map[string]interface{}{
+		"imageSize": quality,
+	}
+
+	// 只有當 aspectRatio 不為空時才設定
+	if aspectRatio != "" {
+		imageConfig["aspectRatio"] = aspectRatio
+	}
+
+	requestBody := map[string]interface{}{
+		"contents": []map[string]interface{}{
+			{
+				"parts": []map[string]interface{}{
+					{"text": prompt},
+				},
+			},
+		},
+		"generationConfig": map[string]interface{}{
+			"responseModalities": []string{"IMAGE"},
+			"imageConfig":        imageConfig,
+		},
+		"safetySettings": []map[string]interface{}{
+			{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+			{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+			{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+			{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+		},
+	}
+
+	return c.sendImageRequest(ctx, requestBody)
+}
+
+// sendImageRequest 發送圖片生成請求的共用函式
+func (c *Client) sendImageRequest(ctx context.Context, requestBody map[string]interface{}) (*ImageResult, error) {
 	jsonBody, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, err
