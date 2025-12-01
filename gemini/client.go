@@ -216,10 +216,10 @@ type DownloadedImage struct {
 func (c *Client) GenerateImageWithContext(ctx context.Context, images []DownloadedImage, prompt, quality, aspectRatio string) (*ImageResult, error) {
 	// 建立 parts
 	var parts []map[string]interface{}
-	
+
 	// 先加入文字 prompt
 	parts = append(parts, map[string]interface{}{"text": prompt})
-	
+
 	// 加入所有圖片
 	for _, img := range images {
 		imageBase64 := base64.StdEncoding.EncodeToString(img.Data)
