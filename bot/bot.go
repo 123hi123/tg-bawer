@@ -240,7 +240,9 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 *支援的比例：*
 ` + "`@1:1`" + ` ` + "`@2:3`" + ` ` + "`@3:2`" + ` ` + "`@3:4`" + ` ` + "`@4:3`" + ` ` + "`@4:5`" + ` ` + "`@5:4`" + ` ` + "`@9:16`" + ` ` + "`@16:9`" + ` ` + "`@21:9`" + `
 
-💡 不指定比例時，AI 會自動決定最適合的比例
+💡 不指定比例時：
+• 有圖片時，使用最接近原圖的支援比例
+• 沒有圖片時，預設使用 1:1
 
 *範例：*
 ` + "`畫一隻可愛的貓咪 @16:9 @4K`" + `
@@ -788,6 +790,8 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 	ratioDisplay := "Auto"
 	if aspectRatio != "" {
 		ratioDisplay = aspectRatio
+	} else if len(images) == 0 {
+		ratioDisplay = defaultAspectRatio + " (預設)"
 	}
 
 	qualityDisplay := quality
@@ -831,7 +835,12 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 		})
 	}
 
-	// 不再自動偵測比例，完全讓 Gemini API 決定（除非使用者有指定）
+	// 比例規則：
+	// 1. 使用者有指定 -> 使用指定值
+	// 2. 有圖片但未指定 -> 使用最接近圖片比例的支援比例
+	// 3. 沒圖片且未指定 -> 預設 1:1
+	aspectRatio = resolveAspectRatio(params.AspectRatio, downloadedImages)
+	ratioDisplay = ratioDisplayText(params.AspectRatio, aspectRatio, len(downloadedImages))
 
 	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
 		serviceName, ratioDisplay, qualityDisplay, len(images)))
@@ -1041,7 +1050,12 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 		})
 	}
 
-	// 不再自動偵測比例，完全讓 Gemini API 決定（除非使用者有指定）
+	// 比例規則：
+	// 1. 使用者有指定 -> 使用指定值
+	// 2. 有圖片但未指定 -> 使用最接近圖片比例的支援比例
+	// 3. 沒圖片且未指定 -> 預設 1:1
+	aspectRatio = resolveAspectRatio(params.AspectRatio, downloadedImages)
+	ratioDisplay = ratioDisplayText(params.AspectRatio, aspectRatio, len(downloadedImages))
 
 	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
 		serviceName, ratioDisplay, qualityDisplay, len(images)))
@@ -1226,7 +1240,12 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 		})
 	}
 
-	// 不再自動偵測比例，完全讓 Gemini API 決定（除非使用者有指定）
+	// 比例規則：
+	// 1. 使用者有指定 -> 使用指定值
+	// 2. 有圖片但未指定 -> 使用最接近圖片比例的支援比例
+	// 3. 沒圖片且未指定 -> 預設 1:1
+	aspectRatio = resolveAspectRatio(params.AspectRatio, downloadedImages)
+	ratioDisplay = ratioDisplayText(params.AspectRatio, aspectRatio, len(downloadedImages))
 
 	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
 		serviceName, ratioDisplay, qualityDisplay, len(images)))
@@ -1374,14 +1393,14 @@ func (b *Bot) handlePhoto(msg *tgbotapi.Message) {
 	imageInfo, err := gemini.GetImageInfo(imageData)
 	if err != nil {
 		log.Printf("無法解析圖片資訊: %v", err)
-		imageInfo = &gemini.ImageInfo{AspectRatio: ""} // 讓模型自動決定
+		imageInfo = &gemini.ImageInfo{AspectRatio: defaultAspectRatio}
+	}
+	if imageInfo.AspectRatio == "" {
+		imageInfo.AspectRatio = defaultAspectRatio
 	}
 
 	// 顯示圖片資訊
-	ratioInfo := "自動"
-	if imageInfo.AspectRatio != "" {
-		ratioInfo = imageInfo.AspectRatio
-	}
+	ratioInfo := imageInfo.AspectRatio
 	b.updateMessage(processingMsg, fmt.Sprintf("⏳ 處理中...\n🔌 服務: %s\n📐 圖片: %dx%d\n📏 比例: %s", serviceName, imageInfo.Width, imageInfo.Height, ratioInfo))
 
 	// 重試邏輯：固定同畫質重試 6 次

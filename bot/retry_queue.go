@@ -95,11 +95,13 @@ func (b *Bot) retryOneFailedGeneration() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
+	aspectRatio := resolveAspectRatio(payload.AspectRatio, downloadedImages)
+
 	var result *gemini.ImageResult
 	if len(downloadedImages) > 0 {
-		result, err = client.GenerateImageWithContext(ctx, downloadedImages, payload.Prompt, payload.Quality, payload.AspectRatio)
+		result, err = client.GenerateImageWithContext(ctx, downloadedImages, payload.Prompt, payload.Quality, aspectRatio)
 	} else {
-		result, err = client.GenerateImageFromText(ctx, payload.Prompt, payload.Quality, payload.AspectRatio)
+		result, err = client.GenerateImageFromText(ctx, payload.Prompt, payload.Quality, aspectRatio)
 	}
 	if err != nil {
 		b.db.MarkFailedGenerationRetry(task.ID, err.Error())

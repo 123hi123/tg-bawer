@@ -1,6 +1,9 @@
 package gemini
 
 import (
+	"bytes"
+	"image"
+	"image/png"
 	"strings"
 	"testing"
 )
@@ -68,5 +71,20 @@ func TestBuildGenerateURL_VertexExpressMode(t *testing.T) {
 	}
 	if !strings.Contains(url, "aiplatform.googleapis.com/v1/publishers/google/models/") {
 		t.Fatalf("expected vertex express endpoint, got: %s", url)
+	}
+}
+
+func TestGetImageInfo_AlwaysReturnNearestRatio(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	if err := png.Encode(buffer, image.NewRGBA(image.Rect(0, 0, 1000, 100))); err != nil {
+		t.Fatalf("encode png failed: %v", err)
+	}
+
+	info, err := GetImageInfo(buffer.Bytes())
+	if err != nil {
+		t.Fatalf("GetImageInfo failed: %v", err)
+	}
+	if info.AspectRatio == "" {
+		t.Fatalf("expected nearest ratio, got empty")
 	}
 }

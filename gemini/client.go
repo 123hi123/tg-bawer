@@ -64,7 +64,7 @@ type TTSResult struct {
 type ImageInfo struct {
 	Width       int
 	Height      int
-	AspectRatio string // 匹配的比例，如 "16:9"，或空字串表示讓模型自動決定
+	AspectRatio string // 匹配的比例，如 "16:9"
 }
 
 // 支援的比例列表
@@ -157,13 +157,8 @@ func GetImageInfo(imageData []byte) (*ImageInfo, error) {
 		}
 	}
 
-	// 如果差異太大（超過 10%），就讓模型自動決定
-	threshold := 0.1
-	if minDiff/actualRatio > threshold {
-		info.AspectRatio = "" // 讓模型自動決定
-	} else {
-		info.AspectRatio = matchedRatio
-	}
+	// 一律使用最接近的支援比例
+	info.AspectRatio = matchedRatio
 
 	return info, nil
 }
