@@ -12,11 +12,11 @@ func main() {
 	// 載入設定
 	cfg := config.LoadConfig()
 
-	if cfg.GeminiAPIKey == "" {
-		log.Fatal("請設定環境變數 GEMINI_API_KEY")
-	}
 	if cfg.BotToken == "" {
 		log.Fatal("請設定環境變數 BOT_TOKEN")
+	}
+	if cfg.GeminiAPIKey == "" {
+		log.Println("⚠️ 未設定 GEMINI_API_KEY，請透過 /service 指令手動新增服務")
 	}
 
 	// 初始化資料庫

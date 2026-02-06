@@ -14,7 +14,9 @@ Telegram Bot powered by Gemini - 用 AI 畫你想要的圖！
 - 🎨 **畫質選擇** - @1K @2K @4K 三種畫質
 - 💾 **Prompt 管理** - 保存、列出、設定預設 Prompt
 - 👥 **群組支援** - 在群組中以 . 開頭觸發
-- 🔄 **智慧重試** - 失敗時自動降級重試（最多 6 次）
+- 🔌 **多服務來源** - 支援 standard / custom URL / Vertex 三種服務
+- 🎨 **畫質不降級重試** - fallback 重試維持使用者指定畫質
+- 🔄 **失敗重試佇列** - 失敗組合入庫，系統每 15 分鐘隨機重試 1 筆
 - 📦 **雙輸出** - 同時輸出預覽圖和原始檔案
 
 ---
@@ -23,11 +25,13 @@ Telegram Bot powered by Gemini - 用 AI 畫你想要的圖！
 
 在開始之前，你需要準備：
 
-### 1. Gemini API Key
+### 1. Gemini API Key（可選）
 
 1. 前往 [Google AI Studio](https://aistudio.google.com/app/apikey)
 2. 點擊 Create API Key
 3. 複製你的 API Key
+
+> 若不想在環境變數放 API Key，也可讓 Bot 啟動後用 `/service add ...` 手動新增。
 
 ### 2. Telegram Bot Token
 
@@ -114,6 +118,12 @@ Bot 會自動抓取整個 Group 的所有圖片一起處理：
 翻譯這張漫畫 @16:9 @4K
 ```
 
+群組回覆圖片時，如果只想使用被回覆的那一張（不要整個 media group），可加上：
+
+```
+翻譯這張 @s
+```
+
 **支援的比例：**
 @1:1 @2:3 @3:2 @3:4 @4:3 @4:5 @5:4 @9:16 @16:9 @21:9
 
@@ -142,6 +152,24 @@ Bot 會自動抓取整個 Group 的所有圖片一起處理：
 | /setdefault | 設定預設 Prompt |
 | /settings | 設定預設畫質 |
 | /delete | 刪除已保存的 Prompt |
+| /service | 服務管理（新增/切換/刪除） |
+
+### 服務管理指令（`/service`）
+
+```bash
+# 查看說明與列表
+/service help
+/service list
+
+# 三種手動新增方式
+/service add standard <名稱> <API_KEY>
+/service add custom <名稱> <BASE_URL> <API_KEY>
+/service add vertex <名稱> <API_KEY> <PROJECT_ID> <LOCATION> [MODEL] [BASE_URL]
+
+# 切換 / 刪除
+/service use <服務ID>
+/service delete <服務ID>
+```
 
 ---
 
@@ -149,7 +177,8 @@ Bot 會自動抓取整個 Group 的所有圖片一起處理：
 
 | 變數 | 必填 | 說明 |
 |------|------|------|
-| GEMINI_API_KEY | ✅ | Google Gemini API Key |
+| GEMINI_API_KEY | ❌ | Google Gemini API Key（可改用 `/service add`） |
+| GEMINI_BASE_URL | ❌ | Gemini API Base URL（自訂代理用） |
 | BOT_TOKEN | ✅ | Telegram Bot Token |
 | DATA_DIR | ❌ | 資料目錄（預設 /app/data） |
 
@@ -167,6 +196,7 @@ go mod tidy
 
 # 設定環境變數
 export GEMINI_API_KEY=your_key
+export GEMINI_BASE_URL=https://generativelanguage.googleapis.com
 export BOT_TOKEN=your_token
 
 # 執行

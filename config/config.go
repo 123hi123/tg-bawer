@@ -5,9 +5,10 @@ import (
 )
 
 type Config struct {
-	GeminiAPIKey string
-	BotToken     string
-	DataDir      string
+	GeminiAPIKey  string
+	GeminiBaseURL string
+	BotToken      string
+	DataDir       string
 }
 
 // 預設的翻譯 Prompt
@@ -21,9 +22,10 @@ const TTSVoiceName = "Kore"
 
 func LoadConfig() *Config {
 	return &Config{
-		GeminiAPIKey: getEnv("GEMINI_API_KEY", ""),
-		BotToken:     getEnv("BOT_TOKEN", ""),
-		DataDir:      getEnv("DATA_DIR", "./data"),
+		GeminiAPIKey:  getEnv("GEMINI_API_KEY", ""),
+		GeminiBaseURL: getEnv("GEMINI_BASE_URL", ""),
+		BotToken:      getEnv("BOT_TOKEN", ""),
+		DataDir:       getEnv("DATA_DIR", "./data"),
 	}
 }
 

@@ -45,8 +45,13 @@ func NewBot(cfg *config.Config, db *database.Database) (*Bot, error) {
 	log.Printf("Bot authorized on account %s", api.Self.UserName)
 
 	bot := &Bot{
-		api:    api,
-		gemini: gemini.NewClient(cfg.GeminiAPIKey),
+		api: api,
+		gemini: gemini.NewClientWithService(gemini.ServiceConfig{
+			Type:    gemini.ServiceTypeStandard,
+			Name:    "env-default",
+			APIKey:  cfg.GeminiAPIKey,
+			BaseURL: cfg.GeminiBaseURL,
+		}),
 		db:     db,
 		config: cfg,
 		mediaGroups: &mediaGroupCache{
@@ -56,6 +61,7 @@ func NewBot(cfg *config.Config, db *database.Database) (*Bot, error) {
 
 	// 啟動清理過期快取的 goroutine
 	go bot.cleanupMediaGroupCache()
+	go bot.retryFailedGenerations()
 
 	return bot, nil
 }
@@ -206,6 +212,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdSettings(msg)
 	case "delete":
 		b.cmdDelete(msg)
+	case "service":
+		b.cmdService(msg)
 	}
 }
 
@@ -227,6 +235,7 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 *參數設定（用 @ 符號，前後需有空格）：*
 • ` + "`@1:1`" + ` ` + "`@16:9`" + ` ` + "`@9:16`" + ` → 設定比例
 • ` + "`@4K`" + ` ` + "`@2K`" + ` ` + "`@1K`" + ` → 設定畫質
+• ` + "`@s`" + ` → 回覆群組圖片時只使用單張，不抓整組
 
 *支援的比例：*
 ` + "`@1:1`" + ` ` + "`@2:3`" + ` ` + "`@3:2`" + ` ` + "`@3:4`" + ` ` + "`@4:3`" + ` ` + "`@4:5`" + ` ` + "`@5:4`" + ` ` + "`@9:16`" + ` ` + "`@16:9`" + ` ` + "`@21:9`" + `
@@ -243,6 +252,7 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 /setdefault - 設定預設 Prompt
 /settings - 設定預設畫質
 /delete - 刪除已保存的 Prompt
+/service - 服務管理（standard/custom/vertex）
 /help - 顯示幫助`
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
@@ -555,11 +565,12 @@ var supportedQualities = map[string]string{
 
 // ParsedParams 解析後的參數
 type ParsedParams struct {
-	Prompt       string
-	AspectRatio  string // 如果沒指定則為空
-	Quality      string // 如果沒指定則為空
-	RatioError   string // 比例錯誤訊息
-	QualityError string // 畫質錯誤訊息
+	Prompt               string
+	AspectRatio          string // 如果沒指定則為空
+	Quality              string // 如果沒指定則為空
+	SingleImageFromGroup bool   // @s：回覆群組圖時只取單張
+	RatioError           string // 比例錯誤訊息
+	QualityError         string // 畫質錯誤訊息
 }
 
 // parseTextParams 解析文字中的 @ 參數
@@ -573,6 +584,13 @@ func parseTextParams(text string) *ParsedParams {
 	for _, part := range parts {
 		if strings.HasPrefix(part, "@") {
 			value := strings.TrimPrefix(part, "@")
+			lowerValue := strings.ToLower(value)
+
+			// 群組圖模式：只取單張
+			if lowerValue == "s" {
+				params.SingleImageFromGroup = true
+				continue
+			}
 
 			// 檢查是否為畫質
 			if q, ok := supportedQualities[value]; ok {
@@ -664,6 +682,15 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 		return
 	}
 
+	serviceConfig, serviceName, err := b.resolveServiceConfig(msg.From.ID)
+	if err != nil {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ "+err.Error()+"\n請先用 /service add 新增服務")
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+		return
+	}
+	gClient := gemini.NewClientWithService(serviceConfig)
+
 	// 收集圖片
 	var images []imageData
 
@@ -682,21 +709,27 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 			// 檢查是否屬於 Media Group
 			log.Printf("[回覆圖片] ReplyToMessage MediaGroupID='%s', MessageID=%d", replyMsg.MediaGroupID, replyMsg.MessageID)
 			if replyMsg.MediaGroupID != "" {
-				// 等待一小段時間讓所有圖片都被快取（Telegram 會分批發送 Media Group）
-				time.Sleep(500 * time.Millisecond)
-
-				// 從快取中取得該 Media Group 的所有圖片
-				groupImages := b.getMediaGroupImages(replyMsg.MediaGroupID)
-				log.Printf("[回覆圖片] 從快取取得 %d 張圖片", len(groupImages))
-				if len(groupImages) > 0 {
-					for _, fileID := range groupImages {
-						images = append(images, imageData{FileID: fileID})
-					}
-				} else {
-					// 快取中沒有，使用回覆訊息中的圖片
-					log.Printf("[回覆圖片] 快取為空，使用單張圖片（圖片可能是在 Bot 啟動前上傳的）")
+				if params.SingleImageFromGroup {
+					log.Printf("[回覆圖片] 偵測到 @s，僅使用單張圖片")
 					photo := replyMsg.Photo[len(replyMsg.Photo)-1]
 					images = append(images, imageData{FileID: photo.FileID})
+				} else {
+					// 等待一小段時間讓所有圖片都被快取（Telegram 會分批發送 Media Group）
+					time.Sleep(500 * time.Millisecond)
+
+					// 從快取中取得該 Media Group 的所有圖片
+					groupImages := b.getMediaGroupImages(replyMsg.MediaGroupID)
+					log.Printf("[回覆圖片] 從快取取得 %d 張圖片", len(groupImages))
+					if len(groupImages) > 0 {
+						for _, fileID := range groupImages {
+							images = append(images, imageData{FileID: fileID})
+						}
+					} else {
+						// 快取中沒有，使用回覆訊息中的圖片
+						log.Printf("[回覆圖片] 快取為空，使用單張圖片（圖片可能是在 Bot 啟動前上傳的）")
+						photo := replyMsg.Photo[len(replyMsg.Photo)-1]
+						images = append(images, imageData{FileID: photo.FileID})
+					}
 				}
 			} else {
 				// 單張圖片
@@ -763,8 +796,8 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 	}
 
 	// 發送處理中訊息（回覆使用者的訊息）
-	statusText := fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-		ratioDisplay, qualityDisplay, len(images))
+	statusText := fmt.Sprintf("⏳ *處理中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		serviceName, ratioDisplay, qualityDisplay, len(images))
 
 	processingMsg, err := b.sendReplyMessage(msg, statusText)
 	if err != nil {
@@ -800,29 +833,26 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 
 	// 不再自動偵測比例，完全讓 Gemini API 決定（除非使用者有指定）
 
-	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-		ratioDisplay, qualityDisplay, len(images)))
+	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		serviceName, ratioDisplay, qualityDisplay, len(images)))
 
-	// 重試邏輯：當前畫質三次 → 1K 三次
+	// 重試邏輯：固定同畫質重試 6 次
 	var result *gemini.ImageResult
-	qualities := []string{quality, quality, quality, "1K", "1K", "1K"}
-	if quality == "1K" {
-		qualities = []string{"1K", "1K", "1K", "1K", "1K", "1K"}
-	}
+	qualities := buildRetryQualities(quality)
 
 	ctx := context.Background()
 	var lastErr error
 
 	for i, q := range qualities {
-		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (嘗試 %d/6，畫質 %s)\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-			i+1, q, ratioDisplay, qualityDisplay, len(images)))
+		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (嘗試 %d/6，畫質 %s)\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+			i+1, q, serviceName, ratioDisplay, qualityDisplay, len(images)))
 
 		if len(downloadedImages) > 0 {
 			// 有圖片的情況
-			result, lastErr = b.gemini.GenerateImageWithContext(ctx, downloadedImages, prompt, q, aspectRatio)
+			result, lastErr = gClient.GenerateImageWithContext(ctx, downloadedImages, prompt, q, aspectRatio)
 		} else {
 			// 純文字生成
-			result, lastErr = b.gemini.GenerateImageFromText(ctx, prompt, q, aspectRatio)
+			result, lastErr = gClient.GenerateImageFromText(ctx, prompt, q, aspectRatio)
 		}
 
 		if lastErr == nil {
@@ -834,7 +864,19 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 	}
 
 	if lastErr != nil {
-		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（已重試 6 次）\n\n<blockquote expandable>%s</blockquote>",
+		var imageFileIDs []string
+		for _, img := range images {
+			imageFileIDs = append(imageFileIDs, img.FileID)
+		}
+		b.enqueueFailedGeneration(msg, msg.MessageID, failedGenerationPayload{
+			Prompt:       prompt,
+			Quality:      quality,
+			AspectRatio:  aspectRatio,
+			ImageFileIDs: imageFileIDs,
+			Service:      serviceConfig,
+		}, lastErr)
+
+		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（已重試 6 次）\n已加入失敗重試佇列，系統每 15 分鐘會隨機挑一筆再試一次。\n\n<blockquote expandable>%s</blockquote>",
 			truncateError(lastErr.Error())))
 		return
 	}
@@ -890,21 +932,36 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 		return
 	}
 
+	serviceConfig, serviceName, err := b.resolveServiceConfig(msg.From.ID)
+	if err != nil {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ "+err.Error()+"\n請先用 /service add 新增服務")
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+		return
+	}
+	gClient := gemini.NewClientWithService(serviceConfig)
+
 	// 收集圖片（從當前訊息）
 	var images []imageData
 	if len(msg.Photo) > 0 {
 		// 檢查是否屬於 Media Group
 		if msg.MediaGroupID != "" {
-			// 從快取中取得該 Media Group 的所有圖片
-			groupImages := b.getMediaGroupImages(msg.MediaGroupID)
-			if len(groupImages) > 0 {
-				for _, fileID := range groupImages {
-					images = append(images, imageData{FileID: fileID})
-				}
-			} else {
-				// 快取中沒有，使用當前訊息中的圖片
+			if params.SingleImageFromGroup {
+				log.Printf("[圖片回覆文字] 偵測到 @s，僅使用單張圖片")
 				photo := msg.Photo[len(msg.Photo)-1]
 				images = append(images, imageData{FileID: photo.FileID})
+			} else {
+				// 從快取中取得該 Media Group 的所有圖片
+				groupImages := b.getMediaGroupImages(msg.MediaGroupID)
+				if len(groupImages) > 0 {
+					for _, fileID := range groupImages {
+						images = append(images, imageData{FileID: fileID})
+					}
+				} else {
+					// 快取中沒有，使用當前訊息中的圖片
+					photo := msg.Photo[len(msg.Photo)-1]
+					images = append(images, imageData{FileID: photo.FileID})
+				}
 			}
 		} else {
 			// 單張圖片
@@ -949,8 +1006,8 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 	}
 
 	// 發送處理中訊息（回覆被引用的文字訊息）
-	statusText := fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-		ratioDisplay, qualityDisplay, len(images))
+	statusText := fmt.Sprintf("⏳ *處理中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		serviceName, ratioDisplay, qualityDisplay, len(images))
 
 	processingMsg, err := b.sendReplyToMessage(msg.ReplyToMessage, statusText)
 	if err != nil {
@@ -986,24 +1043,21 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 
 	// 不再自動偵測比例，完全讓 Gemini API 決定（除非使用者有指定）
 
-	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-		ratioDisplay, qualityDisplay, len(images)))
+	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		serviceName, ratioDisplay, qualityDisplay, len(images)))
 
 	// 重試邏輯
 	var result *gemini.ImageResult
-	qualities := []string{quality, quality, quality, "1K", "1K", "1K"}
-	if quality == "1K" {
-		qualities = []string{"1K", "1K", "1K", "1K", "1K", "1K"}
-	}
+	qualities := buildRetryQualities(quality)
 
 	ctx := context.Background()
 	var lastErr error
 
 	for i, q := range qualities {
-		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (嘗試 %d/6，畫質 %s)\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-			i+1, q, ratioDisplay, qualityDisplay, len(images)))
+		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (嘗試 %d/6，畫質 %s)\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+			i+1, q, serviceName, ratioDisplay, qualityDisplay, len(images)))
 
-		result, lastErr = b.gemini.GenerateImageWithContext(ctx, downloadedImages, prompt, q, aspectRatio)
+		result, lastErr = gClient.GenerateImageWithContext(ctx, downloadedImages, prompt, q, aspectRatio)
 		if lastErr == nil {
 			break
 		}
@@ -1013,7 +1067,19 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 	}
 
 	if lastErr != nil {
-		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（已重試 6 次）\n\n<blockquote expandable>%s</blockquote>",
+		var imageFileIDs []string
+		for _, img := range images {
+			imageFileIDs = append(imageFileIDs, img.FileID)
+		}
+		b.enqueueFailedGeneration(msg, msg.ReplyToMessage.MessageID, failedGenerationPayload{
+			Prompt:       prompt,
+			Quality:      quality,
+			AspectRatio:  aspectRatio,
+			ImageFileIDs: imageFileIDs,
+			Service:      serviceConfig,
+		}, lastErr)
+
+		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（已重試 6 次）\n已加入失敗重試佇列，系統每 15 分鐘會隨機挑一筆再試一次。\n\n<blockquote expandable>%s</blockquote>",
 			truncateError(lastErr.Error())))
 		return
 	}
@@ -1069,6 +1135,15 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 		return
 	}
 
+	serviceConfig, serviceName, err := b.resolveServiceConfig(msg.From.ID)
+	if err != nil {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ "+err.Error()+"\n請先用 /service add 新增服務")
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+		return
+	}
+	gClient := gemini.NewClientWithService(serviceConfig)
+
 	// 收集貼圖
 	var images []imageData
 	if msg.Sticker != nil {
@@ -1116,8 +1191,8 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 	}
 
 	// 發送處理中訊息（回覆被引用的文字訊息）
-	statusText := fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
-		ratioDisplay, qualityDisplay, len(images))
+	statusText := fmt.Sprintf("⏳ *處理中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
+		serviceName, ratioDisplay, qualityDisplay, len(images))
 
 	processingMsg, err := b.sendReplyToMessage(msg.ReplyToMessage, statusText)
 	if err != nil {
@@ -1153,24 +1228,21 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 
 	// 不再自動偵測比例，完全讓 Gemini API 決定（除非使用者有指定）
 
-	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
-		ratioDisplay, qualityDisplay, len(images)))
+	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
+		serviceName, ratioDisplay, qualityDisplay, len(images)))
 
 	// 重試邏輯
 	var result *gemini.ImageResult
-	qualities := []string{quality, quality, quality, "1K", "1K", "1K"}
-	if quality == "1K" {
-		qualities = []string{"1K", "1K", "1K", "1K", "1K", "1K"}
-	}
+	qualities := buildRetryQualities(quality)
 
 	ctx := context.Background()
 	var lastErr error
 
 	for i, q := range qualities {
-		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (嘗試 %d/6，畫質 %s)\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
-			i+1, q, ratioDisplay, qualityDisplay, len(images)))
+		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (嘗試 %d/6，畫質 %s)\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
+			i+1, q, serviceName, ratioDisplay, qualityDisplay, len(images)))
 
-		result, lastErr = b.gemini.GenerateImageWithContext(ctx, downloadedImages, prompt, q, aspectRatio)
+		result, lastErr = gClient.GenerateImageWithContext(ctx, downloadedImages, prompt, q, aspectRatio)
 		if lastErr == nil {
 			break
 		}
@@ -1180,7 +1252,19 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 	}
 
 	if lastErr != nil {
-		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（已重試 6 次）\n\n<blockquote expandable>%s</blockquote>",
+		var imageFileIDs []string
+		for _, img := range images {
+			imageFileIDs = append(imageFileIDs, img.FileID)
+		}
+		b.enqueueFailedGeneration(msg, msg.ReplyToMessage.MessageID, failedGenerationPayload{
+			Prompt:       prompt,
+			Quality:      quality,
+			AspectRatio:  aspectRatio,
+			ImageFileIDs: imageFileIDs,
+			Service:      serviceConfig,
+		}, lastErr)
+
+		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（已重試 6 次）\n已加入失敗重試佇列，系統每 15 分鐘會隨機挑一筆再試一次。\n\n<blockquote expandable>%s</blockquote>",
 			truncateError(lastErr.Error())))
 		return
 	}
@@ -1259,6 +1343,15 @@ func (b *Bot) handlePhoto(msg *tgbotapi.Message) {
 		}
 	}
 
+	serviceConfig, serviceName, err := b.resolveServiceConfig(msg.From.ID)
+	if err != nil {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ "+err.Error()+"\n請先用 /service add 新增服務")
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+		return
+	}
+	gClient := gemini.NewClientWithService(serviceConfig)
+
 	// 發送處理中訊息
 	processingMsg, _ := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ 處理中..."))
 
@@ -1289,22 +1382,19 @@ func (b *Bot) handlePhoto(msg *tgbotapi.Message) {
 	if imageInfo.AspectRatio != "" {
 		ratioInfo = imageInfo.AspectRatio
 	}
-	b.updateMessage(processingMsg, fmt.Sprintf("⏳ 處理中...\n📐 圖片: %dx%d\n📏 比例: %s", imageInfo.Width, imageInfo.Height, ratioInfo))
+	b.updateMessage(processingMsg, fmt.Sprintf("⏳ 處理中...\n🔌 服務: %s\n📐 圖片: %dx%d\n📏 比例: %s", serviceName, imageInfo.Width, imageInfo.Height, ratioInfo))
 
-	// 重試邏輯：2K 三次 → 1K 三次
+	// 重試邏輯：固定同畫質重試 6 次
 	var result *gemini.ImageResult
-	qualities := []string{quality, quality, quality, "1K", "1K", "1K"}
-	if quality == "1K" {
-		qualities = []string{"1K", "1K", "1K", "1K", "1K", "1K"}
-	}
+	qualities := buildRetryQualities(quality)
 
 	ctx := context.Background()
 	var lastErr error
 
 	for i, q := range qualities {
-		b.updateMessage(processingMsg, fmt.Sprintf("⏳ 處理中... (嘗試 %d/6，畫質 %s)\n📐 圖片: %dx%d\n📏 比例: %s", i+1, q, imageInfo.Width, imageInfo.Height, ratioInfo))
+		b.updateMessage(processingMsg, fmt.Sprintf("⏳ 處理中... (嘗試 %d/6，畫質 %s)\n🔌 服務: %s\n📐 圖片: %dx%d\n📏 比例: %s", i+1, q, serviceName, imageInfo.Width, imageInfo.Height, ratioInfo))
 
-		result, lastErr = b.gemini.GenerateImage(ctx, imageData, mimeType, prompt, q, imageInfo.AspectRatio)
+		result, lastErr = gClient.GenerateImage(ctx, imageData, mimeType, prompt, q, imageInfo.AspectRatio)
 		if lastErr == nil {
 			break
 		}
@@ -1314,7 +1404,17 @@ func (b *Bot) handlePhoto(msg *tgbotapi.Message) {
 	}
 
 	if lastErr != nil {
-		b.updateMessage(processingMsg, fmt.Sprintf("❌ 處理失敗（已重試 6 次）\n錯誤：%s", lastErr.Error()))
+		b.enqueueFailedGeneration(msg, msg.MessageID, failedGenerationPayload{
+			Prompt:      prompt,
+			Quality:     quality,
+			AspectRatio: imageInfo.AspectRatio,
+			ImageFileIDs: []string{
+				photo.FileID,
+			},
+			Service: serviceConfig,
+		}, lastErr)
+
+		b.updateMessage(processingMsg, fmt.Sprintf("❌ 處理失敗（已重試 6 次）\n已加入失敗重試佇列，系統每 15 分鐘會隨機挑一筆再試一次。\n錯誤：%s", lastErr.Error()))
 		return
 	}
 
@@ -1324,11 +1424,11 @@ func (b *Bot) handlePhoto(msg *tgbotapi.Message) {
 
 	if withVoice {
 		b.updateMessage(processingMsg, "⏳ 擷取文字中...")
-		extractedText, _ = b.gemini.ExtractText(ctx, imageData, mimeType, config.ExtractTextPrompt)
+		extractedText, _ = gClient.ExtractText(ctx, imageData, mimeType, config.ExtractTextPrompt)
 
 		if extractedText != "" {
 			b.updateMessage(processingMsg, "⏳ 生成語音中...")
-			ttsResult, _ = b.gemini.GenerateTTS(ctx, extractedText, config.TTSVoiceName)
+			ttsResult, _ = gClient.GenerateTTS(ctx, extractedText, config.TTSVoiceName)
 		}
 	}
 

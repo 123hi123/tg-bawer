@@ -12,12 +12,44 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
 type Client struct {
-	apiKey     string
-	httpClient *http.Client
+	apiKey      string
+	baseURL     string
+	serviceType string
+	projectID   string
+	location    string
+	imageModel  string
+	textModel   string
+	ttsModel    string
+	httpClient  *http.Client
+}
+
+const (
+	ServiceTypeStandard = "standard"
+	ServiceTypeCustom   = "custom"
+	ServiceTypeVertex   = "vertex"
+
+	DefaultGeminiBaseURL = "https://generativelanguage.googleapis.com"
+	DefaultVertexBaseURL = "https://aiplatform.googleapis.com"
+
+	DefaultImageModel = "gemini-3-pro-image-preview"
+	DefaultTextModel  = "gemini-2.5-flash"
+	DefaultTTSModel   = "gemini-2.5-flash-preview-tts"
+)
+
+type ServiceConfig struct {
+	Type      string `json:"type"`
+	Name      string `json:"name,omitempty"`
+	APIKey    string `json:"api_key"`
+	BaseURL   string `json:"base_url,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	Location  string `json:"location,omitempty"`
+	Model     string `json:"model,omitempty"`
 }
 
 type ImageResult struct {
@@ -54,7 +86,43 @@ var supportedRatios = []struct {
 
 func NewClient(apiKey string) *Client {
 	return &Client{
-		apiKey: apiKey,
+		apiKey:      apiKey,
+		baseURL:     DefaultGeminiBaseURL,
+		serviceType: ServiceTypeStandard,
+		imageModel:  DefaultImageModel,
+		textModel:   DefaultTextModel,
+		ttsModel:    DefaultTTSModel,
+		httpClient: &http.Client{
+			Timeout: 120 * time.Second,
+		},
+	}
+}
+
+func NewClientWithService(service ServiceConfig) *Client {
+	serviceType := normalizeServiceType(service.Type)
+	baseURL := strings.TrimSpace(service.BaseURL)
+	if baseURL == "" {
+		if serviceType == ServiceTypeVertex {
+			baseURL = DefaultVertexBaseURL
+		} else {
+			baseURL = DefaultGeminiBaseURL
+		}
+	}
+
+	model := strings.TrimSpace(service.Model)
+	if model == "" {
+		model = DefaultImageModel
+	}
+
+	return &Client{
+		apiKey:      service.APIKey,
+		baseURL:     baseURL,
+		serviceType: serviceType,
+		projectID:   strings.TrimSpace(service.ProjectID),
+		location:    strings.TrimSpace(service.Location),
+		imageModel:  model,
+		textModel:   DefaultTextModel,
+		ttsModel:    DefaultTTSModel,
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -145,7 +213,10 @@ func (c *Client) GenerateImage(ctx context.Context, imageData []byte, mimeType, 
 		return nil, err
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key=%s", c.apiKey)
+	url, err := c.buildGenerateURL(c.imageModel)
+	if err != nil {
+		return nil, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
@@ -304,7 +375,10 @@ func (c *Client) sendImageRequest(ctx context.Context, requestBody map[string]in
 		return nil, err
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key=%s", c.apiKey)
+	url, err := c.buildGenerateURL(c.imageModel)
+	if err != nil {
+		return nil, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
@@ -390,7 +464,10 @@ func (c *Client) ExtractText(ctx context.Context, imageData []byte, mimeType, pr
 		return "", err
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s", c.apiKey)
+	url, err := c.buildGenerateURL(c.textModel)
+	if err != nil {
+		return "", err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
@@ -472,7 +549,10 @@ func (c *Client) GenerateTTS(ctx context.Context, text, voiceName string) (*TTSR
 		return nil, err
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=%s", c.apiKey)
+	url, err := c.buildGenerateURL(c.ttsModel)
+	if err != nil {
+		return nil, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
@@ -531,4 +611,79 @@ func (c *Client) GenerateTTS(ctx context.Context, text, voiceName string) (*TTSR
 	}
 
 	return nil, fmt.Errorf("no audio data in response")
+}
+
+func normalizeServiceType(serviceType string) string {
+	normalized := strings.ToLower(strings.TrimSpace(serviceType))
+	switch normalized {
+	case "", "gemini", "standard", "origin", "original":
+		return ServiceTypeStandard
+	case ServiceTypeCustom:
+		return ServiceTypeCustom
+	case ServiceTypeVertex, "gcp":
+		return ServiceTypeVertex
+	default:
+		return ServiceTypeStandard
+	}
+}
+
+func (c *Client) buildGenerateURL(model string) (string, error) {
+	if strings.TrimSpace(c.apiKey) == "" {
+		return "", fmt.Errorf("service api key is empty")
+	}
+
+	baseURL := strings.TrimSpace(c.baseURL)
+	serviceType := normalizeServiceType(c.serviceType)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = DefaultImageModel
+	}
+
+	// 允許直接填完整 generateContent endpoint
+	if strings.Contains(baseURL, ":generateContent") {
+		return appendAPIKey(baseURL, c.apiKey)
+	}
+
+	if serviceType == ServiceTypeVertex {
+		if baseURL == "" {
+			baseURL = DefaultVertexBaseURL
+		}
+
+		projectID := strings.TrimSpace(c.projectID)
+		location := strings.TrimSpace(c.location)
+		if projectID == "" || location == "" {
+			return "", fmt.Errorf("vertex 服務缺少 project_id 或 location")
+		}
+
+		endpoint := fmt.Sprintf(
+			"%s/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent",
+			strings.TrimRight(baseURL, "/"),
+			url.PathEscape(projectID),
+			url.PathEscape(location),
+			url.PathEscape(model),
+		)
+		return appendAPIKey(endpoint, c.apiKey)
+	}
+
+	if baseURL == "" {
+		baseURL = DefaultGeminiBaseURL
+	}
+	endpoint := fmt.Sprintf(
+		"%s/v1beta/models/%s:generateContent",
+		strings.TrimRight(baseURL, "/"),
+		url.PathEscape(model),
+	)
+	return appendAPIKey(endpoint, c.apiKey)
+}
+
+func appendAPIKey(rawURL, apiKey string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	query := parsed.Query()
+	query.Set("key", apiKey)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
