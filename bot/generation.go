@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +49,17 @@ func (b *Bot) runAllGenerationTasks(
 		taskCount++
 	}
 	resultCh := make(chan bool, taskCount)
+
+	// Update status message with task summary
+	if statusMsgID > 0 && taskCount > 0 {
+		summary := buildTaskSummary(allServices, extraGoogleModels, gc, len(downloadedImages) > 0)
+		if summary != "" {
+			statusText := "⏳ *同時生成中...*" + summary
+			edit := tgbotapi.NewEditMessageText(msg.Chat.ID, statusMsgID, statusText)
+			edit.ParseMode = "Markdown"
+			b.api.Send(edit)
+		}
+	}
 
 	// Google image task (main model)
 	if len(allServices) > 0 {
@@ -294,4 +306,36 @@ func (b *Bot) runGrokVideoTask(
 	if _, err := b.api.Send(videoMsg); err != nil {
 		log.Printf("上傳影片失敗: %v", err)
 	}
+}
+
+// buildTaskSummary builds a Markdown summary of all generation tasks that will run.
+func buildTaskSummary(allServices []gemini.ServiceConfig, extraGoogleModels []string, gc *grok.Client, hasImages bool) string {
+	var lines []string
+
+	if len(allServices) > 0 {
+		model := allServices[0].Model
+		if model == "" {
+			model = gemini.DefaultImageModel
+		}
+		lines = append(lines, fmt.Sprintf("• 🌐 Google `%s` 正在繪製", model))
+
+		for _, extraModel := range extraGoogleModels {
+			lines = append(lines, fmt.Sprintf("• ⚡ Google `%s` 正在繪製", extraModel))
+		}
+	}
+
+	if gc != nil {
+		imgModel := gc.ImageModel()
+		if hasImages {
+			imgModel = gc.EditModel()
+		}
+		lines = append(lines, fmt.Sprintf("• 🤖 Grok `%s` 正在繪製", imgModel))
+		lines = append(lines, fmt.Sprintf("• 🎬 Grok `%s` 正在製作", gc.VideoModel()))
+	}
+
+	if len(lines) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("\n\n🔄 *任務列表（共 %d 個服務）：*\n%s", len(lines), strings.Join(lines, "\n"))
 }

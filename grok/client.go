@@ -72,6 +72,21 @@ func (c *Client) Available() bool {
 	return strings.TrimSpace(c.apiKey) != ""
 }
 
+// ImageModel returns the image generation model name.
+func (c *Client) ImageModel() string {
+	return c.imgModel
+}
+
+// EditModel returns the image editing model name.
+func (c *Client) EditModel() string {
+	return c.editModel
+}
+
+// VideoModel returns the video generation model name.
+func (c *Client) VideoModel() string {
+	return c.videoModel
+}
+
 // GenerateImage generates an image from a text prompt.
 func (c *Client) GenerateImage(ctx context.Context, prompt, size string) (*ImageResult, error) {
 	if size == "" {
