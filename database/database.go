@@ -112,12 +112,16 @@ func (d *Database) init() error {
 			user_id INTEGER PRIMARY KEY,
 			default_quality TEXT DEFAULT '2K',
 			default_prompt_id INTEGER,
+			extra_google_model TEXT DEFAULT 'gemini-3.1-flash-image-preview',
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
 	if err != nil {
 		return err
 	}
+
+	// Add extra_google_model column to existing tables (ignore error if already exists)
+	d.db.Exec(`ALTER TABLE user_settings ADD COLUMN extra_google_model TEXT DEFAULT 'gemini-3.1-flash-image-preview'`)
 
 	// 建立使用者服務設定表
 	_, err = d.db.Exec(`
@@ -303,6 +307,31 @@ func (d *Database) SetUserSettings(userID int64, quality string) error {
 		INSERT OR REPLACE INTO user_settings (user_id, default_quality, updated_at)
 		VALUES (?, ?, CURRENT_TIMESTAMP)
 	`, userID, quality)
+	return err
+}
+
+// GetUserExtraGoogleModel 取得使用者設定的額外 Google 繪圖模型
+// 回傳空字串表示已停用
+func (d *Database) GetUserExtraGoogleModel(userID int64) (string, error) {
+	row := d.db.QueryRow(`SELECT COALESCE(extra_google_model, 'gemini-3.1-flash-image-preview') FROM user_settings WHERE user_id = ?`, userID)
+	var model string
+	if err := row.Scan(&model); err != nil {
+		if err == sql.ErrNoRows {
+			return "gemini-3.1-flash-image-preview", nil
+		}
+		return "", err
+	}
+	return model, nil
+}
+
+// SetUserExtraGoogleModel 設定使用者的額外 Google 繪圖模型
+// 傳入空字串可停用
+func (d *Database) SetUserExtraGoogleModel(userID int64, model string) error {
+	_, err := d.db.Exec(`
+		INSERT INTO user_settings (user_id, extra_google_model, updated_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(user_id) DO UPDATE SET extra_google_model = excluded.extra_google_model, updated_at = excluded.updated_at
+	`, userID, model)
 	return err
 }
 

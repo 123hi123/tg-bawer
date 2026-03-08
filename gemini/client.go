@@ -38,6 +38,7 @@ const (
 	DefaultVertexBaseURL = "https://aiplatform.googleapis.com"
 
 	DefaultImageModel = "gemini-3-pro-image-preview"
+	ExtraImageModel   = "gemini-3.1-flash-image-preview"
 	DefaultTextModel  = "gemini-2.5-flash"
 	DefaultTTSModel   = "gemini-2.5-flash-preview-tts"
 )

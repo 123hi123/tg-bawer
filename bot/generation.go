@@ -30,26 +30,46 @@ func (b *Bot) runAllGenerationTasks(
 	downloadedImages []gemini.DownloadedImage,
 	imageFileIDs []string,
 	allServices []gemini.ServiceConfig,
+	extraGoogleModels []string,
 	statusMsgID int,
 ) {
 	var wg sync.WaitGroup
 
-	// resultCh collects success/failure for image tasks (Google + Grok image).
+	// Count expected results: main Google task + extra model tasks + Grok image task.
 	// Grok video is treated as optional/best-effort and does not report into this
 	// channel; its failures are silently enqueued for retry via /queue.
-	resultCh := make(chan bool, 2)
+	taskCount := 0
+	if len(allServices) > 0 {
+		taskCount++ // main Google task
+		taskCount += len(extraGoogleModels)
+	}
+	gc := b.resolveGrokClient(msg.From.ID)
+	if gc != nil {
+		taskCount++
+	}
+	resultCh := make(chan bool, taskCount)
 
-	// Google image task
+	// Google image task (main model)
 	if len(allServices) > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resultCh <- b.runGoogleImageTask(msg, replyToMsgID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices)
+			resultCh <- b.runGoogleImageTask(msg, replyToMsgID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, "", "")
 		}()
+
+		// Extra model tasks for Google channel
+		for _, extraModel := range extraGoogleModels {
+			extraModel := extraModel // capture loop variable
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				resultCh <- b.runGoogleImageTask(msg, replyToMsgID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, extraModel, "")
+			}()
+		}
 	}
 
 	// Grok image and video tasks
-	if gc := b.resolveGrokClient(msg.From.ID); gc != nil {
+	if gc != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -87,6 +107,8 @@ func (b *Bot) runAllGenerationTasks(
 }
 
 // runGoogleImageTask runs Google image generation with all available services.
+// modelOverride overrides the model for all services (empty = use each service's default model).
+// label is used as the caption prefix (empty = auto-generated from modelOverride or default).
 // Returns true on success, false on failure (failure is enqueued for retry).
 func (b *Bot) runGoogleImageTask(
 	msg *tgbotapi.Message,
@@ -95,12 +117,33 @@ func (b *Bot) runGoogleImageTask(
 	downloadedImages []gemini.DownloadedImage,
 	imageFileIDs []string,
 	allServices []gemini.ServiceConfig,
+	modelOverride string,
+	label string,
 ) bool {
+	// Build caption label
+	if label == "" {
+		if modelOverride != "" {
+			label = "⚡ Google Flash 圖片"
+		} else {
+			label = "🌐 Google 圖片"
+		}
+	}
+
+	// Override model in service configs if requested
+	services := allServices
+	if modelOverride != "" {
+		overridden := make([]gemini.ServiceConfig, len(allServices))
+		for i, svc := range allServices {
+			svc.Model = modelOverride
+			overridden[i] = svc
+		}
+		services = overridden
+	}
 	ctx := context.Background()
 	var result *gemini.ImageResult
 	var lastErr error
 
-	for _, svcCfg := range allServices {
+	for _, svcCfg := range services {
 		gClient := gemini.NewClientWithService(svcCfg)
 		for attempt := 0; attempt < 6; attempt++ {
 			if len(downloadedImages) > 0 {
@@ -124,8 +167,8 @@ func (b *Bot) runGoogleImageTask(
 
 	if result == nil || len(result.ImageData) == 0 {
 		var svcCfg gemini.ServiceConfig
-		if len(allServices) > 0 {
-			svcCfg = allServices[0]
+		if len(services) > 0 {
+			svcCfg = services[0]
 		}
 		b.enqueueFailedGeneration(msg, replyToMsgID, failedGenerationPayload{
 			Prompt:       prompt,
@@ -141,7 +184,7 @@ func (b *Bot) runGoogleImageTask(
 	// Send compressed preview
 	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "google_preview.png", Bytes: result.ImageData})
 	photoMsg.ReplyToMessageID = replyToMsgID
-	photoMsg.Caption = "🌐 Google 圖片"
+	photoMsg.Caption = label
 	if _, err := b.api.Send(photoMsg); err != nil {
 		log.Printf("發送 Google 預覽圖失敗: %v", err)
 	}
