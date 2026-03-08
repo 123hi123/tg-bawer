@@ -465,6 +465,13 @@ func (b *Bot) handleMessageReaction(reaction *MessageReactionUpdated) {
 		quality = "2K"
 	}
 
+	// Get extra Google model setting
+	extraGoogleModel, _ := b.db.GetUserExtraGoogleModel(userID)
+	var extraGoogleModels []string
+	if extraGoogleModel != "" {
+		extraGoogleModels = []string{extraGoogleModel}
+	}
+
 	// Get default prompt
 	prompt := config.DefaultPrompt
 	if defaultPrompt, _ := b.db.GetDefaultPrompt(userID); defaultPrompt != nil {
@@ -513,7 +520,7 @@ func (b *Bot) handleMessageReaction(reaction *MessageReactionUpdated) {
 	}
 
 	log.Printf("[Reaction] 使用者 %d 對訊息 %d 表情回應，開始生成", userID, reaction.MessageID)
-	b.runAllGenerationTasks(syntheticMsg, reaction.MessageID, prompt, quality, aspectRatio, downloadedImages, fileIDs, allServices, statusMsg.MessageID)
+	b.runAllGenerationTasks(syntheticMsg, reaction.MessageID, prompt, quality, aspectRatio, downloadedImages, fileIDs, allServices, extraGoogleModels, statusMsg.MessageID)
 }
 
 func (b *Bot) handleCommand(msg *tgbotapi.Message) {
@@ -720,19 +727,42 @@ func (b *Bot) cmdSetDefault(msg *tgbotapi.Message) {
 
 func (b *Bot) cmdSettings(msg *tgbotapi.Message) {
 	currentQuality, _ := b.db.GetUserSettings(msg.From.ID)
+	currentExtraModel, _ := b.db.GetUserExtraGoogleModel(msg.From.ID)
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+	keyboard := b.buildSettingsKeyboard(currentQuality, currentExtraModel)
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, b.buildSettingsText(currentQuality, currentExtraModel))
+	reply.ParseMode = "Markdown"
+	reply.ReplyMarkup = keyboard
+	b.api.Send(reply)
+}
+
+func (b *Bot) buildSettingsKeyboard(currentQuality, currentExtraModel string) tgbotapi.InlineKeyboardMarkup {
+	flashEnabled := currentExtraModel != ""
+	flashToggleLabel := "⚡ Flash 額外繪圖：啟用"
+	flashToggleData := "extra_model:disable"
+	if !flashEnabled {
+		flashToggleLabel = "⚡ Flash 額外繪圖：停用"
+		flashToggleData = "extra_model:enable"
+	}
+	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(qualityButton("1K", currentQuality), "quality:1K"),
 			tgbotapi.NewInlineKeyboardButtonData(qualityButton("2K", currentQuality), "quality:2K"),
 			tgbotapi.NewInlineKeyboardButtonData(qualityButton("4K", currentQuality), "quality:4K"),
 		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(flashToggleLabel, flashToggleData),
+		),
 	)
+}
 
-	reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("⚙️ *設定*\n\n目前預設畫質：*%s*\n\n點擊更改：", currentQuality))
-	reply.ParseMode = "Markdown"
-	reply.ReplyMarkup = keyboard
-	b.api.Send(reply)
+func (b *Bot) buildSettingsText(currentQuality, currentExtraModel string) string {
+	extraModelDisplay := currentExtraModel
+	if extraModelDisplay == "" {
+		extraModelDisplay = "（停用）"
+	}
+	return fmt.Sprintf("⚙️ *設定*\n\n目前預設畫質：*%s*\n⚡ Google Flash 額外模型：`%s`\n\n點擊更改：", currentQuality, extraModelDisplay)
 }
 
 func qualityButton(q, current string) string {
@@ -874,6 +904,8 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 		b.callbackQuality(callback, value)
 	case "del":
 		b.callbackDelete(callback, value)
+	case "extra_model":
+		b.callbackExtraModel(callback, value)
 	}
 }
 
@@ -936,16 +968,45 @@ func (b *Bot) callbackQuality(callback *tgbotapi.CallbackQuery, quality string) 
 	b.api.Request(tgbotapi.NewCallback(callback.ID, fmt.Sprintf("✅ 預設畫質已設為 %s", quality)))
 
 	// 更新訊息
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(qualityButton("1K", quality), "quality:1K"),
-			tgbotapi.NewInlineKeyboardButtonData(qualityButton("2K", quality), "quality:2K"),
-			tgbotapi.NewInlineKeyboardButtonData(qualityButton("4K", quality), "quality:4K"),
-		),
-	)
+	currentExtraModel, _ := b.db.GetUserExtraGoogleModel(callback.From.ID)
+	keyboard := b.buildSettingsKeyboard(quality, currentExtraModel)
 
 	edit := tgbotapi.NewEditMessageText(callback.Message.Chat.ID, callback.Message.MessageID,
-		fmt.Sprintf("⚙️ *設定*\n\n目前預設畫質：*%s*\n\n點擊更改：", quality))
+		b.buildSettingsText(quality, currentExtraModel))
+	edit.ParseMode = "Markdown"
+	edit.ReplyMarkup = &keyboard
+	b.api.Send(edit)
+}
+
+func (b *Bot) callbackExtraModel(callback *tgbotapi.CallbackQuery, action string) {
+	var newModel string
+	switch action {
+	case "enable":
+		newModel = gemini.ExtraImageModel
+	case "disable":
+		newModel = ""
+	default:
+		b.api.Request(tgbotapi.NewCallback(callback.ID, "❌ 無效操作"))
+		return
+	}
+
+	if err := b.db.SetUserExtraGoogleModel(callback.From.ID, newModel); err != nil {
+		b.api.Request(tgbotapi.NewCallback(callback.ID, "設定失敗"))
+		return
+	}
+
+	if newModel != "" {
+		b.api.Request(tgbotapi.NewCallback(callback.ID, fmt.Sprintf("✅ Flash 額外模型已啟用：%s", newModel)))
+	} else {
+		b.api.Request(tgbotapi.NewCallback(callback.ID, "✅ Flash 額外模型已停用"))
+	}
+
+	// 更新訊息
+	currentQuality, _ := b.db.GetUserSettings(callback.From.ID)
+	keyboard := b.buildSettingsKeyboard(currentQuality, newModel)
+
+	edit := tgbotapi.NewEditMessageText(callback.Message.Chat.ID, callback.Message.MessageID,
+		b.buildSettingsText(currentQuality, newModel))
 	edit.ParseMode = "Markdown"
 	edit.ReplyMarkup = &keyboard
 	b.api.Send(edit)
@@ -1271,7 +1332,13 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 		imageFileIDs = append(imageFileIDs, img.FileID)
 	}
 
-	b.runAllGenerationTasks(msg, msg.MessageID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, processingMsg.MessageID)
+	extraGoogleModel, _ := b.db.GetUserExtraGoogleModel(msg.From.ID)
+	var extraGoogleModels []string
+	if extraGoogleModel != "" {
+		extraGoogleModels = []string{extraGoogleModel}
+	}
+
+	b.runAllGenerationTasks(msg, msg.MessageID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, extraGoogleModels, processingMsg.MessageID)
 }
 
 // handleImageReplyText 處理用圖片回覆文字訊息的情況
@@ -1434,7 +1501,13 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 		imageFileIDs = append(imageFileIDs, img.FileID)
 	}
 
-	b.runAllGenerationTasks(msg, msg.ReplyToMessage.MessageID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, processingMsg.MessageID)
+	extraGoogleModel, _ := b.db.GetUserExtraGoogleModel(msg.From.ID)
+	var extraGoogleModels []string
+	if extraGoogleModel != "" {
+		extraGoogleModels = []string{extraGoogleModel}
+	}
+
+	b.runAllGenerationTasks(msg, msg.ReplyToMessage.MessageID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, extraGoogleModels, processingMsg.MessageID)
 }
 
 // handleStickerReplyText 處理用貼圖回覆文字訊息的情況
@@ -1579,7 +1652,13 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 		imageFileIDs = append(imageFileIDs, img.FileID)
 	}
 
-	b.runAllGenerationTasks(msg, msg.ReplyToMessage.MessageID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, processingMsg.MessageID)
+	extraGoogleModel, _ := b.db.GetUserExtraGoogleModel(msg.From.ID)
+	var extraGoogleModels []string
+	if extraGoogleModel != "" {
+		extraGoogleModels = []string{extraGoogleModel}
+	}
+
+	b.runAllGenerationTasks(msg, msg.ReplyToMessage.MessageID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, extraGoogleModels, processingMsg.MessageID)
 }
 
 type imageData struct {
