@@ -42,6 +42,32 @@ func TestAvailable(t *testing.T) {
 	}
 }
 
+func TestModelGetters_Defaults(t *testing.T) {
+	c := NewClient("key", "", "", "", "")
+	if c.ImageModel() != DefaultImgModel {
+		t.Fatalf("expected %s, got %s", DefaultImgModel, c.ImageModel())
+	}
+	if c.EditModel() != DefaultEditModel {
+		t.Fatalf("expected %s, got %s", DefaultEditModel, c.EditModel())
+	}
+	if c.VideoModel() != DefaultVideoModel {
+		t.Fatalf("expected %s, got %s", DefaultVideoModel, c.VideoModel())
+	}
+}
+
+func TestModelGetters_Custom(t *testing.T) {
+	c := NewClient("key", "", "my-img", "my-edit", "my-video")
+	if c.ImageModel() != "my-img" {
+		t.Fatalf("expected my-img, got %s", c.ImageModel())
+	}
+	if c.EditModel() != "my-edit" {
+		t.Fatalf("expected my-edit, got %s", c.EditModel())
+	}
+	if c.VideoModel() != "my-video" {
+		t.Fatalf("expected my-video, got %s", c.VideoModel())
+	}
+}
+
 func TestExtractImageURL_ChatCompletions(t *testing.T) {
 	resp := map[string]interface{}{
 		"choices": []interface{}{
