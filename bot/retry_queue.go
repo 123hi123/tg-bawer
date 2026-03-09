@@ -124,6 +124,7 @@ func (b *Bot) retryOneFailedGeneration() {
 
 	var result *gemini.ImageResult
 	resultSource := source // track which provider actually succeeded
+	resultModel := ""      // track which model produced the result
 
 	grokClient := b.resolveGrokClient(task.UserID)
 	if source == taskTypeGrokImage && grokClient != nil {
@@ -138,6 +139,11 @@ func (b *Bot) retryOneFailedGeneration() {
 			}
 			if err == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
 				result = &gemini.ImageResult{ImageData: grokResult.ImageData}
+				if len(downloadedImages) > 0 {
+					resultModel = gc.EditModel()
+				} else {
+					resultModel = gc.ImageModel()
+				}
 				break
 			}
 			log.Printf("Grok retry attempt %d failed (id=%d): %v", attempt+1, task.ID, err)
@@ -175,6 +181,10 @@ func (b *Bot) retryOneFailedGeneration() {
 			}
 			if result != nil && len(result.ImageData) > 0 {
 				resultSource = taskTypeGoogleImage
+				resultModel = svcCfg.Model
+				if resultModel == "" {
+					resultModel = gemini.DefaultImageModel
+				}
 				break
 			}
 		}
@@ -193,7 +203,7 @@ func (b *Bot) retryOneFailedGeneration() {
 		return
 	}
 
-	if err := b.sendRetrySuccessResult(task, payload, result, resultSource); err != nil {
+	if err := b.sendRetrySuccessResult(task, payload, result, resultSource, resultModel); err != nil {
 		b.db.MarkFailedGenerationRetry(task.ID, err.Error())
 		log.Printf("定時重試成功但發送失敗 (id=%d): %v", task.ID, err)
 		return
@@ -286,7 +296,7 @@ func (b *Bot) downloadImagesByFileIDs(fileIDs []string) ([]gemini.DownloadedImag
 	return downloadedImages, nil
 }
 
-func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload failedGenerationPayload, result *gemini.ImageResult, resultSource string) error {
+func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload failedGenerationPayload, result *gemini.ImageResult, resultSource string, resultModel string) error {
 	if result == nil || len(result.ImageData) == 0 {
 		return fmt.Errorf("empty retry result")
 	}
@@ -301,6 +311,9 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 	default:
 		sourceLabel = "🖼 圖片"
 		log.Printf("sendRetrySuccessResult: unexpected resultSource=%q (task #%d)", resultSource, task.ID)
+	}
+	if resultModel != "" {
+		sourceLabel += " - " + resultModel
 	}
 
 	notice := tgbotapi.NewMessage(task.ChatID, fmt.Sprintf("♻️ 自動重試成功（任務 #%d）\n結果來源：%s", task.ID, sourceLabel))
