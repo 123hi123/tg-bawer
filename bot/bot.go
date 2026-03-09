@@ -433,7 +433,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 // handleMessageReaction processes a message_reaction update.
 // When a user adds a reaction to a message containing a photo or sticker,
-// the bot generates images based on that media using the user's default prompt.
+// the bot adds the image to the user's image queue and replies with the queue position.
 func (b *Bot) handleMessageReaction(reaction *MessageReactionUpdated) {
 	if reaction.User == nil {
 		return // ignore anonymous reactions (e.g. in channels)
@@ -452,75 +452,28 @@ func (b *Bot) handleMessageReaction(reaction *MessageReactionUpdated) {
 	}
 
 	userID := reaction.User.ID
+	chatID := reaction.Chat.ID
 
-	allServices, _ := b.resolveAllServiceConfigs(userID)
-	gc := b.resolveGrokClient(userID)
-	if len(allServices) == 0 && (gc == nil || !gc.Available()) {
-		return
-	}
-
-	// Get user quality setting
-	quality, _ := b.db.GetUserSettings(userID)
-	if quality == "" {
-		quality = "2K"
-	}
-
-	// Get extra Google model setting
-	extraGoogleModel, _ := b.db.GetUserExtraGoogleModel(userID)
-	var extraGoogleModels []string
-	if extraGoogleModel != "" {
-		extraGoogleModels = []string{extraGoogleModel}
-	}
-
-	// Get default prompt
-	prompt := config.DefaultPrompt
-	if defaultPrompt, _ := b.db.GetDefaultPrompt(userID); defaultPrompt != nil {
-		prompt = defaultPrompt.Prompt
-	}
-
-	// Build a synthetic message so existing generation helpers can be reused
-	chatCopy := reaction.Chat
-	syntheticMsg := &tgbotapi.Message{
-		MessageID: reaction.MessageID,
-		Chat:      &chatCopy,
-		From:      reaction.User,
-		Date:      reaction.Date,
-	}
-
-	// Download the media
-	var downloadedImages []gemini.DownloadedImage
+	// Add each image to the user's queue
 	for _, fileID := range fileIDs {
-		file, err := b.api.GetFile(tgbotapi.FileConfig{FileID: fileID})
-		if err != nil {
-			log.Printf("[Reaction] 無法取得圖片 %s: %v", fileID, err)
-			continue
-		}
-		data, mimeType, err := b.downloadFile(file.FilePath)
-		if err != nil {
-			log.Printf("[Reaction] 下載圖片失敗 %s: %v", fileID, err)
-			continue
-		}
-		downloadedImages = append(downloadedImages, gemini.DownloadedImage{
-			Data:     data,
-			MimeType: mimeType,
-		})
+		b.addToImageQueue(userID, chatID, fileID)
 	}
 
-	if len(downloadedImages) == 0 {
-		return
+	// Count current queue size
+	b.imageQueues.RLock()
+	key := fmt.Sprintf("%d:%d", userID, chatID)
+	queueLen := len(b.imageQueues.queues[key])
+	b.imageQueues.RUnlock()
+
+	// Reply to the reacted message with queue position info
+	replyText := fmt.Sprintf("📸 已加入圖片佇列（目前第 %d 張）\n\n💡 傳送文字即可開始生成", queueLen)
+	reply := tgbotapi.NewMessage(chatID, replyText)
+	reply.ReplyToMessageID = reaction.MessageID
+	if _, err := b.api.Send(reply); err != nil {
+		log.Printf("[Reaction] 發送佇列通知失敗: %v", err)
 	}
 
-	aspectRatio := resolveAspectRatio("", downloadedImages)
-
-	statusText := fmt.Sprintf("⏳ *處理中（表情回應）...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`", aspectRatio, quality)
-	statusMsg, err := b.sendReplyMessage(syntheticMsg, statusText)
-	if err != nil {
-		log.Printf("[Reaction] 發送狀態訊息失敗: %v", err)
-		return
-	}
-
-	log.Printf("[Reaction] 使用者 %d 對訊息 %d 表情回應，開始生成", userID, reaction.MessageID)
-	b.runAllGenerationTasks(syntheticMsg, reaction.MessageID, prompt, quality, aspectRatio, downloadedImages, fileIDs, allServices, extraGoogleModels, statusMsg.MessageID)
+	log.Printf("[Reaction] 使用者 %d 對訊息 %d 表情回應，已加入佇列（目前 %d 張）", userID, reaction.MessageID, queueLen)
 }
 
 func (b *Bot) handleCommand(msg *tgbotapi.Message) {
@@ -1115,6 +1068,23 @@ func truncateError(err string) string {
 	return err
 }
 
+// noServiceSetupText is the tutorial text shown when a user has no configured services.
+const noServiceSetupText = `❌ *尚未設定任何服務*
+
+請先新增至少一個服務才能開始使用：
+
+*快速設定：*
+` + "`/service add standard <名稱> <API_KEY>`" + `
+例如：` + "`/service add standard my-gemini AIza...`" + `
+
+*其他服務類型：*
+• ` + "`standard`" + ` — 官方 Gemini API
+• ` + "`custom`" + ` — 自訂 Base URL + API Key
+• ` + "`vertex`" + ` — Google Vertex AI
+• ` + "`grok`" + ` — Grok 影像生成
+
+👉 輸入 /service help 查看完整設定說明`
+
 func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 	// 取得文字內容
 	text := msg.Text
@@ -1162,7 +1132,8 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 
 	allServices, _ := b.resolveAllServiceConfigs(msg.From.ID)
 	if len(allServices) == 0 && !b.grokClient.Available() {
-		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 尚未設定任何服務，請先使用 /service add 新增服務或設定 GROK_API_KEY")
+		reply := tgbotapi.NewMessage(msg.Chat.ID, noServiceSetupText)
+		reply.ParseMode = "Markdown"
 		reply.ReplyToMessageID = msg.MessageID
 		b.api.Send(reply)
 		return
@@ -1379,7 +1350,8 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 
 	allServices, _ := b.resolveAllServiceConfigs(msg.From.ID)
 	if len(allServices) == 0 && !b.grokClient.Available() {
-		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 尚未設定任何服務，請先使用 /service add 新增服務或設定 GROK_API_KEY")
+		reply := tgbotapi.NewMessage(msg.Chat.ID, noServiceSetupText)
+		reply.ParseMode = "Markdown"
 		reply.ReplyToMessageID = msg.MessageID
 		b.api.Send(reply)
 		return
@@ -1548,7 +1520,8 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 
 	allServices, _ := b.resolveAllServiceConfigs(msg.From.ID)
 	if len(allServices) == 0 && !b.grokClient.Available() {
-		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 尚未設定任何服務，請先使用 /service add 新增服務或設定 GROK_API_KEY")
+		reply := tgbotapi.NewMessage(msg.Chat.ID, noServiceSetupText)
+		reply.ParseMode = "Markdown"
 		reply.ReplyToMessageID = msg.MessageID
 		b.api.Send(reply)
 		return
@@ -1722,7 +1695,8 @@ func (b *Bot) handlePhoto(msg *tgbotapi.Message) {
 
 	allServices, _ := b.resolveAllServiceConfigs(msg.From.ID)
 	if len(allServices) == 0 && !b.grokClient.Available() {
-		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 尚未設定任何服務，請先使用 /service add 新增服務或設定 GROK_API_KEY")
+		reply := tgbotapi.NewMessage(msg.Chat.ID, noServiceSetupText)
+		reply.ParseMode = "Markdown"
 		reply.ReplyToMessageID = msg.MessageID
 		b.api.Send(reply)
 		return
