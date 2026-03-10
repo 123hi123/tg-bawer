@@ -150,6 +150,62 @@ func TestGetFailedGenerationCounts(t *testing.T) {
 	}
 }
 
+func TestGetAllFailedGenerationCounts(t *testing.T) {
+	db, err := NewDatabase(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabase failed: %v", err)
+	}
+	defer db.Close()
+
+	// Add tasks for different users and source types
+	if err := db.AddFailedGeneration(42, 1, 0, `{"prompt":"p"}`, "", "google_image"); err != nil {
+		t.Fatalf("AddFailedGeneration failed: %v", err)
+	}
+	if err := db.AddFailedGeneration(42, 1, 0, `{"prompt":"p"}`, "", "grok_image"); err != nil {
+		t.Fatalf("AddFailedGeneration failed: %v", err)
+	}
+	if err := db.AddFailedGeneration(99, 1, 0, `{"prompt":"p"}`, "", "google_image"); err != nil {
+		t.Fatalf("AddFailedGeneration failed: %v", err)
+	}
+	if err := db.AddFailedGeneration(99, 1, 0, `{"prompt":"p"}`, "", "grok_video"); err != nil {
+		t.Fatalf("AddFailedGeneration failed: %v", err)
+	}
+
+	counts, err := db.GetAllFailedGenerationCounts()
+	if err != nil {
+		t.Fatalf("GetAllFailedGenerationCounts failed: %v", err)
+	}
+
+	// google_image: user 42 + user 99 = 2
+	if counts["google_image"] != 2 {
+		t.Errorf("expected google_image=2, got %d", counts["google_image"])
+	}
+	// grok_image: user 42 = 1
+	if counts["grok_image"] != 1 {
+		t.Errorf("expected grok_image=1, got %d", counts["grok_image"])
+	}
+	// grok_video: user 99 = 1
+	if counts["grok_video"] != 1 {
+		t.Errorf("expected grok_video=1, got %d", counts["grok_video"])
+	}
+}
+
+func TestGetAllFailedGenerationCounts_Empty(t *testing.T) {
+	db, err := NewDatabase(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabase failed: %v", err)
+	}
+	defer db.Close()
+
+	counts, err := db.GetAllFailedGenerationCounts()
+	if err != nil {
+		t.Fatalf("GetAllFailedGenerationCounts failed: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Errorf("expected empty counts, got %v", counts)
+	}
+}
+
 func TestImageQueue(t *testing.T) {
 	db, err := NewDatabase(t.TempDir())
 	if err != nil {

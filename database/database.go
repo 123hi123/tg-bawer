@@ -620,6 +620,31 @@ func (d *Database) GetFailedGenerationCounts(userID int64) (map[string]int, erro
 	return counts, nil
 }
 
+// GetAllFailedGenerationCounts returns counts of pending retry tasks grouped by
+// source type across all users.
+func (d *Database) GetAllFailedGenerationCounts() (map[string]int, error) {
+	rows, err := d.db.Query(`
+		SELECT COALESCE(source, 'google'), COUNT(*)
+		FROM failed_generations
+		GROUP BY COALESCE(source, 'google')
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var source string
+		var count int
+		if err := rows.Scan(&source, &count); err != nil {
+			return nil, err
+		}
+		counts[source] = count
+	}
+	return counts, nil
+}
+
 func (d *Database) Close() error {
 	return d.db.Close()
 }
