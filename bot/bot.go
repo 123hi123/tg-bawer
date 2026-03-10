@@ -504,8 +504,6 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdDelete(msg)
 	case "service":
 		b.cmdService(msg)
-	case "queue":
-		b.cmdQueue(msg)
 	case "errors":
 		b.cmdErrors(msg)
 	case "state":
@@ -551,7 +549,6 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 /settings - 設定預設畫質
 /delete - 刪除已保存的 Prompt
 /service - 服務管理（standard/custom/vertex）
-/queue - 查看待重試任務佇列
 /errors - 查看最近錯誤記錄
 /state - 查看專案磁碟使用狀態
 /help - 顯示幫助`
@@ -760,35 +757,6 @@ func (b *Bot) cmdDelete(msg *tgbotapi.Message) {
 	b.api.Send(reply)
 }
 
-func (b *Bot) cmdQueue(msg *tgbotapi.Message) {
-	counts, err := b.db.GetFailedGenerationCounts(msg.From.ID)
-	if err != nil {
-		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 取得佇列失敗："+err.Error())
-		b.api.Send(reply)
-		return
-	}
-
-	// Consolidate backward-compatible source values into canonical task types
-	googleCount := counts[taskTypeGoogleImage] + counts["google"]
-	grokImgCount := counts[taskTypeGrokImage] + counts["grok"]
-	grokVideoCount := counts[taskTypeGrokVideo]
-	total := googleCount + grokImgCount + grokVideoCount
-
-	var text string
-	if total == 0 {
-		text = "✅ 目前沒有待重試的任務"
-	} else {
-		text = fmt.Sprintf(
-			"📋 *待重試任務列表*\n\n🌐 Google 圖片：%d\n🤖 Grok 圖片：%d\n🎬 Grok 影片：%d\n\n總計：%d",
-			googleCount, grokImgCount, grokVideoCount, total,
-		)
-	}
-
-	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
-	reply.ParseMode = "Markdown"
-	b.api.Send(reply)
-}
-
 // addErrorLog appends an error entry to the in-memory error log ring buffer.
 func (b *Bot) addErrorLog(source, params, response string) {
 	b.errorLogMu.Lock()
@@ -860,7 +828,6 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "settings", Description: "調整畫質與模型設定"},
 		tgbotapi.BotCommand{Command: "delete", Description: "刪除已保存的 Prompt"},
 		tgbotapi.BotCommand{Command: "service", Description: "管理 AI 服務（新增/切換/刪除）"},
-		tgbotapi.BotCommand{Command: "queue", Description: "查看待重試任務佇列狀態"},
 		tgbotapi.BotCommand{Command: "errors", Description: "查看最近的錯誤記錄"},
 		tgbotapi.BotCommand{Command: "state", Description: "查看磁碟、重試佇列與資源使用狀態"},
 	)
