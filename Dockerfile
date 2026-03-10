@@ -27,6 +27,13 @@ COPY --from=builder /app/gemini-manga-bot .
 RUN mkdir -p /app/data
 
 ENV GEMINI_API_KEY=""
+ENV GEMINI_BASE_URL=""
+ENV GEMINI_MODEL=""
+ENV GROK_API_KEY=""
+ENV GROK_BASE_URL=""
+ENV GROK_IMG_MODEL=""
+ENV GROK_EDIT_MODEL=""
+ENV GROK_VIDEO_MODEL=""
 ENV BOT_TOKEN=""
 ENV DATA_DIR="/app/data"
 

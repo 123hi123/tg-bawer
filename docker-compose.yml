@@ -5,6 +5,13 @@ services:
     restart: unless-stopped
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_BASE_URL=${GEMINI_BASE_URL}
+      - GEMINI_MODEL=${GEMINI_MODEL}
+      - GROK_API_KEY=${GROK_API_KEY}
+      - GROK_BASE_URL=${GROK_BASE_URL}
+      - GROK_IMG_MODEL=${GROK_IMG_MODEL}
+      - GROK_EDIT_MODEL=${GROK_EDIT_MODEL}
+      - GROK_VIDEO_MODEL=${GROK_VIDEO_MODEL}
       - BOT_TOKEN=${BOT_TOKEN}
       - DATA_DIR=/app/data
     volumes:

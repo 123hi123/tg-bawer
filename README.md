@@ -7,6 +7,7 @@ Telegram Bot powered by Gemini - 用 AI 畫你想要的圖！
 ## ✨ 功能特色
 
 - 🖼️ **AI 圖片生成** - 輸入文字描述，AI 幫你生成圖片
+- 🎬 **Grok 影片生成** - 固定輸出 30 秒、720p 影片
 - 🔄 **圖片編輯** - 回覆圖片並描述你想要的修改
 - 📸 **多圖支援** - 一次上傳多張圖片，Bot 會全部抓取處理
 - 🎭 **貼圖支援** - 可以用貼圖當作圖片素材
@@ -51,6 +52,8 @@ docker run -d \
   --name tg-bawer \
   --restart unless-stopped \
   -e GEMINI_API_KEY=你的_GEMINI_API_KEY \
+  -e GROK_API_KEY=你的_GROK_API_KEY \
+  -e GROK_BASE_URL=你的_GROK_BASE_URL \
   -e BOT_TOKEN=你的_BOT_TOKEN \
   -v ~/.tg-bawer:/app/data \
   ghcr.io/123hi123/tg-bawer:latest
@@ -61,6 +64,8 @@ docker run -d \
 1. 建立 .env 檔案：
    ```
    GEMINI_API_KEY=你的_GEMINI_API_KEY
+   GROK_API_KEY=你的_GROK_API_KEY
+   GROK_BASE_URL=你的_GROK_BASE_URL
    BOT_TOKEN=你的_BOT_TOKEN
    ```
 
@@ -182,6 +187,12 @@ Bot 會自動抓取整個 Group 的所有圖片一起處理：
 |------|------|------|
 | GEMINI_API_KEY | ❌ | Google Gemini API Key（可改用 `/service add`） |
 | GEMINI_BASE_URL | ❌ | Gemini API Base URL（自訂代理用） |
+| GEMINI_MODEL | ❌ | Gemini 圖像模型 |
+| GROK_API_KEY | ❌ | Grok API Key |
+| GROK_BASE_URL | ❌ | Grok API Base URL |
+| GROK_IMG_MODEL | ❌ | Grok 圖片生成模型 |
+| GROK_EDIT_MODEL | ❌ | Grok 圖片編輯模型 |
+| GROK_VIDEO_MODEL | ❌ | Grok 影片生成模型 |
 | BOT_TOKEN | ✅ | Telegram Bot Token |
 | DATA_DIR | ❌ | 資料目錄（預設 /app/data） |
 
@@ -200,6 +211,8 @@ go mod tidy
 # 設定環境變數
 export GEMINI_API_KEY=your_key
 export GEMINI_BASE_URL=https://generativelanguage.googleapis.com
+export GROK_API_KEY=your_grok_key
+export GROK_BASE_URL=http://127.0.0.1:8000
 export BOT_TOKEN=your_token
 
 # 執行

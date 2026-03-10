@@ -1,6 +1,7 @@
 package grok
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -35,10 +37,19 @@ type VideoResult struct {
 const (
 	ServiceTypeGrok = "grok"
 
-	DefaultBaseURL    = "http://127.0.0.1:8000"
-	DefaultImgModel   = "grok-imagine-1.0"
-	DefaultEditModel  = "grok-imagine-1.0-edit"
-	DefaultVideoModel = "grok-imagine-1.0-video"
+	DefaultBaseURL     = "http://127.0.0.1:8000"
+	DefaultImgModel    = "grok-imagine-1.0"
+	DefaultEditModel   = "grok-imagine-1.0-edit"
+	DefaultVideoModel  = "grok-imagine-1.0-video"
+	DefaultVideoRatio  = "9:16"
+	DefaultVideoLen    = 30
+	DefaultVideoRes    = "720p"
+	DefaultVideoPreset = "custom"
+)
+
+var (
+	sourceAttrPattern = regexp.MustCompile(`src=['"]([^'"]+)['"]`)
+	httpURLPattern    = regexp.MustCompile(`https?://[^\s"'<>]+`)
 )
 
 // NewClient creates a new Grok client.
@@ -62,7 +73,7 @@ func NewClient(apiKey, baseURL, imgModel, editModel, videoModel string) *Client 
 		editModel:  editModel,
 		videoModel: videoModel,
 		httpClient: &http.Client{
-			Timeout: 180 * time.Second,
+			Timeout: 6 * time.Minute,
 		},
 	}
 }
@@ -134,10 +145,19 @@ func (c *Client) GenerateImage(ctx context.Context, prompt, size string) (*Image
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("grok: API error (status %d): %s", resp.StatusCode, string(body))
+		payloads, _ := extractJSONPayloads(body)
+		return nil, buildAPIError(body, payloads, resp.StatusCode)
 	}
 
-	imageURL, err := extractImageURL(body)
+	payloads, err := extractJSONPayloads(body)
+	if err != nil {
+		return nil, err
+	}
+	if err := detectAPIError(payloads); err != nil {
+		return nil, err
+	}
+
+	imageURL, err := extractImageURLFromPayloads(payloads)
 	if err != nil {
 		return nil, err
 	}
@@ -236,14 +256,14 @@ func (c *Client) EditImage(ctx context.Context, imageData []byte, prompt, size s
 
 // GenerateVideo generates a video from text prompt, optionally with a reference image URL.
 func (c *Client) GenerateVideo(ctx context.Context, prompt string, imageURL string) (*VideoResult, error) {
-	var content interface{}
+	content := []map[string]interface{}{
+		{"type": "text", "text": prompt},
+	}
 	if imageURL != "" {
-		content = []map[string]interface{}{
-			{"type": "text", "text": prompt},
-			{"type": "image_url", "image_url": map[string]string{"url": imageURL}},
-		}
-	} else {
-		content = prompt
+		content = append(content, map[string]interface{}{
+			"type":      "image_url",
+			"image_url": map[string]string{"url": imageURL},
+		})
 	}
 
 	requestBody := map[string]interface{}{
@@ -255,10 +275,10 @@ func (c *Client) GenerateVideo(ctx context.Context, prompt string, imageURL stri
 			},
 		},
 		"video_config": map[string]interface{}{
-			"aspect_ratio":    "9:16",
-			"video_length":    30,
-			"resolution_name": "480p",
-			"preset":          "custom",
+			"aspect_ratio":    DefaultVideoRatio,
+			"video_length":    DefaultVideoLen,
+			"resolution_name": DefaultVideoRes,
+			"preset":          DefaultVideoPreset,
 		},
 	}
 
@@ -287,10 +307,19 @@ func (c *Client) GenerateVideo(ctx context.Context, prompt string, imageURL stri
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("grok: API error (status %d): %s", resp.StatusCode, string(body))
+		payloads, _ := extractJSONPayloads(body)
+		return nil, buildAPIError(body, payloads, resp.StatusCode)
 	}
 
-	videoURL, err := extractVideoURL(body)
+	payloads, err := extractJSONPayloads(body)
+	if err != nil {
+		return nil, err
+	}
+	if err := detectAPIError(payloads); err != nil {
+		return nil, err
+	}
+
+	videoURL, err := extractVideoURLFromPayloads(payloads)
 	if err != nil {
 		return nil, err
 	}
@@ -305,6 +334,80 @@ func (c *Client) GenerateVideo(ctx context.Context, prompt string, imageURL stri
 	}
 
 	return &VideoResult{VideoData: videoData}, nil
+}
+
+func extractJSONPayloads(body []byte) ([][]byte, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("grok: empty response body")
+	}
+	if json.Valid(trimmed) {
+		return [][]byte{trimmed}, nil
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(trimmed))
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+
+	payloads := make([][]byte, 0, 4)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+
+		if json.Valid([]byte(payload)) {
+			payloads = append(payloads, []byte(payload))
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("grok: read SSE response: %w", err)
+	}
+	if len(payloads) == 0 {
+		return nil, fmt.Errorf("grok: no JSON payload found in response")
+	}
+
+	return payloads, nil
+}
+
+func buildAPIError(body []byte, payloads [][]byte, statusCode int) error {
+	if msg := extractAPIErrorMessageFromPayloads(payloads); msg != "" {
+		return fmt.Errorf("grok: API error (status %d): %s", statusCode, msg)
+	}
+	return fmt.Errorf("grok: API error (status %d): %s", statusCode, strings.TrimSpace(string(body)))
+}
+
+func detectAPIError(payloads [][]byte) error {
+	if msg := extractAPIErrorMessageFromPayloads(payloads); msg != "" {
+		return fmt.Errorf("grok: API error: %s", msg)
+	}
+	return nil
+}
+
+func extractAPIErrorMessageFromPayloads(payloads [][]byte) string {
+	for i := len(payloads) - 1; i >= 0; i-- {
+		if msg := extractAPIErrorMessage(payloads[i]); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+func extractAPIErrorMessage(body []byte) string {
+	var result struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(result.Error.Message)
 }
 
 // extractImageURL extracts the image URL from a chat completions response.
@@ -326,29 +429,25 @@ func extractImageURL(body []byte) (string, error) {
 		return "", fmt.Errorf("grok: no message in choice")
 	}
 
-	content, ok := message["content"].(string)
-	if ok && strings.HasPrefix(content, "http") {
-		return content, nil
+	if imageURL := extractURLFromContentValue(message["content"]); imageURL != "" {
+		return imageURL, nil
 	}
 
-	// Content might be an array with image_url
-	contentArr, ok := message["content"].([]interface{})
-	if ok {
-		for _, item := range contentArr {
-			itemMap, ok := item.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if itemMap["type"] == "image_url" {
-				if imgURL, ok := itemMap["image_url"].(map[string]interface{}); ok {
-					if u, ok := imgURL["url"].(string); ok && u != "" {
-						return u, nil
-					}
-				}
-			}
+	return "", fmt.Errorf("grok: no image URL found in response")
+}
+
+func extractImageURLFromPayloads(payloads [][]byte) (string, error) {
+	var lastErr error
+	for i := len(payloads) - 1; i >= 0; i-- {
+		imageURL, err := extractImageURL(payloads[i])
+		if err == nil {
+			return imageURL, nil
 		}
+		lastErr = err
 	}
-
+	if lastErr != nil {
+		return "", lastErr
+	}
 	return "", fmt.Errorf("grok: no image URL found in response")
 }
 
@@ -372,6 +471,21 @@ func extractEditImageURL(body []byte) (string, error) {
 	return "", fmt.Errorf("grok: no URL in data response")
 }
 
+func extractVideoURLFromPayloads(payloads [][]byte) (string, error) {
+	var lastErr error
+	for i := len(payloads) - 1; i >= 0; i-- {
+		videoURL, err := extractVideoURL(payloads[i])
+		if err == nil {
+			return videoURL, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("grok: no video URL found in response")
+}
+
 // extractVideoURL extracts the video URL from a chat completions response.
 func extractVideoURL(body []byte) (string, error) {
 	var result map[string]interface{}
@@ -385,44 +499,60 @@ func extractVideoURL(body []byte) (string, error) {
 	}
 
 	choice := choices[0].(map[string]interface{})
-	message, ok := choice["message"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("grok: no message in choice")
+	if message, ok := choice["message"].(map[string]interface{}); ok {
+		if videoURL := extractURLFromContentValue(message["content"]); videoURL != "" {
+			return videoURL, nil
+		}
 	}
-
-	// Video URL might be in content as string
-	content, ok := message["content"].(string)
-	if ok && strings.HasPrefix(content, "http") {
-		return content, nil
+	if delta, ok := choice["delta"].(map[string]interface{}); ok {
+		if videoURL := extractURLFromContentValue(delta["content"]); videoURL != "" {
+			return videoURL, nil
+		}
 	}
+	return "", fmt.Errorf("grok: no video URL found in response")
+}
 
-	// Or in content array
-	contentArr, ok := message["content"].([]interface{})
-	if ok {
-		for _, item := range contentArr {
+func extractURLFromContentValue(content interface{}) string {
+	switch typed := content.(type) {
+	case string:
+		return extractURLFromStringContent(typed)
+	case []interface{}:
+		for _, item := range typed {
 			itemMap, ok := item.(map[string]interface{})
 			if !ok {
 				continue
 			}
 			if itemMap["type"] == "video_url" {
-				if vidURL, ok := itemMap["video_url"].(map[string]interface{}); ok {
-					if u, ok := vidURL["url"].(string); ok && u != "" {
-						return u, nil
+				if videoURL, ok := itemMap["video_url"].(map[string]interface{}); ok {
+					if u, ok := videoURL["url"].(string); ok && u != "" {
+						return u
 					}
 				}
 			}
-			// Also try image_url type (some APIs return video in image_url)
 			if itemMap["type"] == "image_url" {
-				if imgURL, ok := itemMap["image_url"].(map[string]interface{}); ok {
-					if u, ok := imgURL["url"].(string); ok && u != "" {
-						return u, nil
+				if imageURL, ok := itemMap["image_url"].(map[string]interface{}); ok {
+					if u, ok := imageURL["url"].(string); ok && u != "" {
+						return u
 					}
 				}
 			}
 		}
 	}
+	return ""
+}
 
-	return "", fmt.Errorf("grok: no video URL found in response")
+func extractURLFromStringContent(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	if matches := sourceAttrPattern.FindStringSubmatch(content); len(matches) == 2 {
+		return matches[1]
+	}
+	if match := httpURLPattern.FindString(content); match != "" {
+		return match
+	}
+	return ""
 }
 
 // downloadURL downloads content from a URL.
