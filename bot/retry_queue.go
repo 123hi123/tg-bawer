@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"tg-bawer/database"
@@ -72,6 +73,9 @@ func (b *Bot) retryOneFailedGeneration() {
 	if task == nil {
 		return
 	}
+
+	atomic.AddInt32(&b.activeRetries, 1)
+	defer atomic.AddInt32(&b.activeRetries, -1)
 
 	// Delete tasks that have exceeded the maximum retry count
 	if task.RetryCount >= maxRetryCount {

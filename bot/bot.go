@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tg-bawer/config"
@@ -77,16 +79,17 @@ type errorLogEntry struct {
 const maxErrorLogEntries = 5
 
 type Bot struct {
-	api         *tgbotapi.BotAPI
-	gemini      *gemini.Client
-	grokClient  *grok.Client
-	db          *database.Database
-	config      *config.Config
-	mediaGroups *mediaGroupCache
-	imageQueues *userImageQueueCache
-	msgPhotos   *msgPhotoCache
-	errorLog    []errorLogEntry
-	errorLogMu  sync.Mutex
+	api           *tgbotapi.BotAPI
+	gemini        *gemini.Client
+	grokClient    *grok.Client
+	db            *database.Database
+	config        *config.Config
+	mediaGroups   *mediaGroupCache
+	imageQueues   *userImageQueueCache
+	msgPhotos     *msgPhotoCache
+	errorLog      []errorLogEntry
+	errorLogMu    sync.Mutex
+	activeRetries int32 // atomic counter for currently retrying tasks
 }
 
 // userImageQueueCache is an in-memory cache for per-user image queues with expiration.
@@ -859,7 +862,7 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "service", Description: "管理 AI 服務（新增/切換/刪除）"},
 		tgbotapi.BotCommand{Command: "queue", Description: "查看待重試任務佇列狀態"},
 		tgbotapi.BotCommand{Command: "errors", Description: "查看最近的錯誤記錄"},
-		tgbotapi.BotCommand{Command: "state", Description: "查看專案磁碟與資料庫使用狀態"},
+		tgbotapi.BotCommand{Command: "state", Description: "查看磁碟、重試佇列與資源使用狀態"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
 		log.Printf("註冊斜線指令失敗: %v", err)
@@ -934,7 +937,34 @@ func (b *Bot) cmdState(msg *tgbotapi.Message) {
 	sb.WriteString(fmt.Sprintf("📝 Markdown 檔案：%s\n", formatSize(mdSize)))
 	sb.WriteString(fmt.Sprintf("🖼 圖片檔案：%s\n", formatSize(imageSize)))
 	sb.WriteString(fmt.Sprintf("📁 其他檔案：%s\n", formatSize(otherSize)))
-	sb.WriteString(fmt.Sprintf("\n💾 資料目錄總計：%s", formatSize(totalSize)))
+	sb.WriteString(fmt.Sprintf("\n💾 資料目錄總計：%s\n", formatSize(totalSize)))
+
+	// Retry queue info
+	counts, err := b.db.GetAllFailedGenerationCounts()
+	if err == nil {
+		googleCount := counts[taskTypeGoogleImage] + counts["google"]
+		grokImgCount := counts[taskTypeGrokImage] + counts["grok"]
+		grokVideoCount := counts[taskTypeGrokVideo]
+		total := googleCount + grokImgCount + grokVideoCount
+		retrying := atomic.LoadInt32(&b.activeRetries)
+
+		sb.WriteString("\n♻️ *重試佇列狀態*\n\n")
+		sb.WriteString(fmt.Sprintf("🌐 Google 圖片：%d\n", googleCount))
+		sb.WriteString(fmt.Sprintf("🤖 Grok 圖片：%d\n", grokImgCount))
+		sb.WriteString(fmt.Sprintf("🎬 Grok 影片：%d\n", grokVideoCount))
+		sb.WriteString(fmt.Sprintf("📋 佇列總計：%d\n", total))
+		sb.WriteString(fmt.Sprintf("🔄 正在重試：%d", retrying))
+	}
+
+	// CPU and memory usage
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	sb.WriteString("\n\n⚙️ *服務資源使用*\n\n")
+	sb.WriteString(fmt.Sprintf("🧠 記憶體使用：%s\n", formatSize(int64(memStats.Alloc))))
+	sb.WriteString(fmt.Sprintf("🖥 系統記憶體：%s\n", formatSize(int64(memStats.Sys))))
+	sb.WriteString(fmt.Sprintf("🔢 Goroutines：%d\n", runtime.NumGoroutine()))
+	sb.WriteString(fmt.Sprintf("💻 CPU 核心數：%d", runtime.NumCPU()))
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, sb.String())
 	reply.ParseMode = "Markdown"
