@@ -772,6 +772,44 @@ func (d *Database) GetAllUserServices(userID int64) ([]UserService, error) {
 	return d.GetUserServices(userID)
 }
 
+// GetPublicServices returns all services where is_public = TRUE, across all users.
+func (d *Database) GetPublicServices() ([]UserService, error) {
+	rows, err := d.db.Query(`
+		SELECT id, user_id, name, service_type, api_key, base_url, project_id, location, model, is_default, COALESCE(is_public, FALSE), created_at
+		FROM user_services
+		WHERE is_public = TRUE
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var services []UserService
+	for rows.Next() {
+		var service UserService
+		if err := rows.Scan(
+			&service.ID,
+			&service.UserID,
+			&service.Name,
+			&service.Type,
+			&service.APIKey,
+			&service.BaseURL,
+			&service.ProjectID,
+			&service.Location,
+			&service.Model,
+			&service.IsDefault,
+			&service.IsPublic,
+			&service.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		services = append(services, service)
+	}
+
+	return services, nil
+}
+
 // UserImageQueueItem represents an entry in the user's image queue.
 type UserImageQueueItem struct {
 	ID        int64

@@ -258,6 +258,86 @@ func TestGetAllFailedGenerationCounts_Empty(t *testing.T) {
 	}
 }
 
+func TestGetPublicServices(t *testing.T) {
+	db, err := NewDatabase(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabase failed: %v", err)
+	}
+	defer db.Close()
+
+	// Add services for two different users
+	id1, err := db.AddUserService(1, "standard", "user1-private", "key1", "", "", "", "", true)
+	if err != nil {
+		t.Fatalf("AddUserService failed: %v", err)
+	}
+	id2, err := db.AddUserService(1, "custom", "user1-public", "key2", "https://example.com", "", "", "", false)
+	if err != nil {
+		t.Fatalf("AddUserService failed: %v", err)
+	}
+	_, err = db.AddUserService(2, "standard", "user2-private", "key3", "", "", "", "", true)
+	if err != nil {
+		t.Fatalf("AddUserService failed: %v", err)
+	}
+	id4, err := db.AddUserService(2, "grok", "user2-public-grok", "key4", "http://grok-host:8000", "", "", "", false)
+	if err != nil {
+		t.Fatalf("AddUserService failed: %v", err)
+	}
+
+	// Initially no public services
+	public, err := db.GetPublicServices()
+	if err != nil {
+		t.Fatalf("GetPublicServices failed: %v", err)
+	}
+	if len(public) != 0 {
+		t.Fatalf("expected 0 public services, got %d", len(public))
+	}
+
+	// Set user1's second service and user2's fourth service as public
+	if err := db.SetUserServicePublic(1, id2, true); err != nil {
+		t.Fatalf("SetUserServicePublic failed: %v", err)
+	}
+	if err := db.SetUserServicePublic(2, id4, true); err != nil {
+		t.Fatalf("SetUserServicePublic failed: %v", err)
+	}
+
+	public, err = db.GetPublicServices()
+	if err != nil {
+		t.Fatalf("GetPublicServices failed: %v", err)
+	}
+	if len(public) != 2 {
+		t.Fatalf("expected 2 public services, got %d", len(public))
+	}
+
+	// Verify the private services are not in the result
+	for _, s := range public {
+		if s.ID == id1 {
+			t.Errorf("private service id=%d should not appear in public list", id1)
+		}
+	}
+
+	// Verify all returned services are indeed public
+	for _, s := range public {
+		if !s.IsPublic {
+			t.Errorf("service %d should be public", s.ID)
+		}
+	}
+
+	// Revoke one public service
+	if err := db.SetUserServicePublic(1, id2, false); err != nil {
+		t.Fatalf("SetUserServicePublic(false) failed: %v", err)
+	}
+	public, err = db.GetPublicServices()
+	if err != nil {
+		t.Fatalf("GetPublicServices after revoke failed: %v", err)
+	}
+	if len(public) != 1 {
+		t.Fatalf("expected 1 public service after revoke, got %d", len(public))
+	}
+	if public[0].ID != id4 {
+		t.Errorf("expected remaining public service id=%d, got %d", id4, public[0].ID)
+	}
+}
+
 func TestImageQueue(t *testing.T) {
 	db, err := NewDatabase(t.TempDir())
 	if err != nil {
