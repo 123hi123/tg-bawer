@@ -56,11 +56,13 @@ func (b *Bot) enqueueFailedGeneration(msg *tgbotapi.Message, replyToMessageID in
 }
 
 func (b *Bot) retryFailedGenerations() {
-	ticker := time.NewTicker(15 * time.Minute)
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		b.retryOneFailedGeneration()
+		for i := 0; i < 3; i++ {
+			go b.retryOneFailedGeneration()
+		}
 	}
 }
 
