@@ -31,7 +31,16 @@ func (b *Bot) cmdService(msg *tgbotapi.Message) {
 		b.cmdServiceUse(msg, args)
 	case "delete", "del", "rm":
 		b.cmdServiceDelete(msg, args)
+	case "pub", "pri":
+		// /service pub <id> or /service pri <id>
+		b.cmdServicePublic(msg, args)
 	default:
+		// Check if first arg is a numeric ID: /service <id> pub/pri
+		if _, err := strconv.ParseInt(args[0], 10, 64); err == nil && len(args) >= 2 {
+			reordered := []string{strings.ToLower(args[1]), args[0]}
+			b.cmdServicePublic(msg, reordered)
+			return
+		}
 		b.sendServiceHelp(msg)
 	}
 }
@@ -49,6 +58,8 @@ func (b *Bot) sendServiceHelp(msg *tgbotapi.Message) {
 ` + "`/service list`" + `
 ` + "`/service use <服務ID>`" + `
 ` + "`/service delete <服務ID>`" + `
+` + "`/service <服務ID> pub`" + ` — 設為公開
+` + "`/service <服務ID> pri`" + ` — 設為私人
 
 ` + "`/service add standard <名稱> <API_KEY>`" + `
 ` + "`/service add custom <名稱> <BASE_URL> <API_KEY>`" + `
@@ -85,13 +96,18 @@ func (b *Bot) sendServiceList(msg *tgbotapi.Message) {
 		if service.IsDefault {
 			defaultMark = " [預設]"
 		}
+		publicMark := " [私人]"
+		if service.IsPublic {
+			publicMark = " [公開]"
+		}
 
 		detail := fmt.Sprintf(
-			"#%d %s (%s)%s key=%s",
+			"#%d %s (%s)%s%s key=%s",
 			service.ID,
 			service.Name,
 			service.Type,
 			defaultMark,
+			publicMark,
 			maskSecret(service.APIKey),
 		)
 
@@ -318,6 +334,42 @@ func (b *Bot) cmdServiceDelete(msg *tgbotapi.Message, args []string) {
 	}
 
 	b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ 已刪除服務 #%d", serviceID)))
+}
+
+func (b *Bot) cmdServicePublic(msg *tgbotapi.Message, args []string) {
+	// args[0] should be "pub" or "pri", args[1] should be the service ID
+	if len(args) < 2 {
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 格式：/service <服務ID> pub 或 /service <服務ID> pri"))
+		return
+	}
+
+	action := strings.ToLower(args[0])
+	if action != "pub" && action != "pri" {
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 請使用 pub（公開）或 pri（私人）"))
+		return
+	}
+
+	serviceID, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil {
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 服務 ID 必須是數字"))
+		return
+	}
+
+	isPublic := action == "pub"
+	if err := b.db.SetUserServicePublic(msg.From.ID, serviceID, isPublic); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 找不到該服務 ID，請先用 /service list 查詢"))
+			return
+		}
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 修改服務失敗："+err.Error()))
+		return
+	}
+
+	status := "公開"
+	if !isPublic {
+		status = "私人"
+	}
+	b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ 服務 #%d 已設為%s", serviceID, status)))
 }
 
 // resolveAllServiceConfigs returns all available Gemini/Google service configs for a user (for rotation).
