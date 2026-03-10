@@ -172,6 +172,10 @@ Bot 會自動抓取整個 Group 的所有圖片一起處理：
 # 切換 / 刪除
 /service use <服務ID>
 /service delete <服務ID>
+
+# 設為公開 / 私人
+/service <服務ID> pub
+/service <服務ID> pri
 ```
 
 ---

@@ -40,6 +40,7 @@ type UserService struct {
 	Location  string
 	Model     string
 	IsDefault bool
+	IsPublic  bool
 	CreatedAt time.Time
 }
 
@@ -143,6 +144,9 @@ func (d *Database) init() error {
 	if err != nil {
 		return err
 	}
+
+	// Add is_public column to existing tables (ignore error if already exists)
+	d.db.Exec(`ALTER TABLE user_services ADD COLUMN is_public BOOLEAN DEFAULT FALSE`)
 
 	// 建立生成失敗重試佇列表
 	_, err = d.db.Exec(`
@@ -388,7 +392,7 @@ func (d *Database) AddUserService(userID int64, serviceType, name, apiKey, baseU
 
 func (d *Database) GetUserServices(userID int64) ([]UserService, error) {
 	rows, err := d.db.Query(`
-		SELECT id, user_id, name, service_type, api_key, base_url, project_id, location, model, is_default, created_at
+		SELECT id, user_id, name, service_type, api_key, base_url, project_id, location, model, is_default, COALESCE(is_public, FALSE), created_at
 		FROM user_services
 		WHERE user_id = ?
 		ORDER BY is_default DESC, created_at DESC
@@ -412,6 +416,7 @@ func (d *Database) GetUserServices(userID int64) ([]UserService, error) {
 			&service.Location,
 			&service.Model,
 			&service.IsDefault,
+			&service.IsPublic,
 			&service.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -424,7 +429,7 @@ func (d *Database) GetUserServices(userID int64) ([]UserService, error) {
 
 func (d *Database) GetDefaultUserService(userID int64) (*UserService, error) {
 	row := d.db.QueryRow(`
-		SELECT id, user_id, name, service_type, api_key, base_url, project_id, location, model, is_default, created_at
+		SELECT id, user_id, name, service_type, api_key, base_url, project_id, location, model, is_default, COALESCE(is_public, FALSE), created_at
 		FROM user_services
 		WHERE user_id = ? AND is_default = TRUE
 		ORDER BY created_at DESC
@@ -443,6 +448,7 @@ func (d *Database) GetDefaultUserService(userID int64) (*UserService, error) {
 		&service.Location,
 		&service.Model,
 		&service.IsDefault,
+		&service.IsPublic,
 		&service.CreatedAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
@@ -529,6 +535,25 @@ func (d *Database) DeleteUserService(userID int64, serviceID int64) error {
 	}
 
 	return tx.Commit()
+}
+
+func (d *Database) SetUserServicePublic(userID int64, serviceID int64, isPublic bool) error {
+	result, err := d.db.Exec(`
+		UPDATE user_services
+		SET is_public = ?
+		WHERE user_id = ? AND id = ?
+	`, isPublic, userID, serviceID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (d *Database) AddFailedGeneration(userID, chatID, replyToMessageID int64, payload, lastError, source string) error {

@@ -49,6 +49,58 @@ func TestUserServiceCRUD(t *testing.T) {
 	}
 }
 
+func TestSetUserServicePublic(t *testing.T) {
+	db, err := NewDatabase(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabase failed: %v", err)
+	}
+	defer db.Close()
+
+	id, err := db.AddUserService(1, "standard", "main", "key1", "", "", "", "", true)
+	if err != nil {
+		t.Fatalf("AddUserService failed: %v", err)
+	}
+
+	// New service should default to private
+	services, err := db.GetUserServices(1)
+	if err != nil {
+		t.Fatalf("GetUserServices failed: %v", err)
+	}
+	if len(services) != 1 || services[0].IsPublic {
+		t.Fatalf("expected service to default to private, got %+v", services)
+	}
+
+	// Set to public
+	if err := db.SetUserServicePublic(1, id, true); err != nil {
+		t.Fatalf("SetUserServicePublic(true) failed: %v", err)
+	}
+	services, err = db.GetUserServices(1)
+	if err != nil {
+		t.Fatalf("GetUserServices after pub failed: %v", err)
+	}
+	if !services[0].IsPublic {
+		t.Fatalf("expected service to be public, got %+v", services[0])
+	}
+
+	// Set back to private
+	if err := db.SetUserServicePublic(1, id, false); err != nil {
+		t.Fatalf("SetUserServicePublic(false) failed: %v", err)
+	}
+	services, err = db.GetUserServices(1)
+	if err != nil {
+		t.Fatalf("GetUserServices after pri failed: %v", err)
+	}
+	if services[0].IsPublic {
+		t.Fatalf("expected service to be private, got %+v", services[0])
+	}
+
+	// Non-existent service should return ErrNoRows
+	err = db.SetUserServicePublic(1, 9999, true)
+	if err == nil {
+		t.Fatalf("expected error for non-existent service")
+	}
+}
+
 func TestFailedGenerationQueue(t *testing.T) {
 	db, err := NewDatabase(t.TempDir())
 	if err != nil {
