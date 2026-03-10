@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -139,6 +141,9 @@ func NewBot(cfg *config.Config, db *database.Database) (*Bot, error) {
 	go bot.cleanupMediaGroupCache()
 	go bot.retryFailedGenerations()
 	go bot.cleanupImageQueues()
+
+	// 註冊 Telegram 斜線指令選單
+	bot.registerCommands()
 
 	return bot, nil
 }
@@ -500,6 +505,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdQueue(msg)
 	case "errors":
 		b.cmdErrors(msg)
+	case "state":
+		b.cmdState(msg)
 	}
 }
 
@@ -543,6 +550,7 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 /service - 服務管理（standard/custom/vertex）
 /queue - 查看待重試任務佇列
 /errors - 查看最近錯誤記錄
+/state - 查看專案磁碟使用狀態
 /help - 顯示幫助`
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
@@ -834,6 +842,103 @@ func escapeMarkdownV2(s string) string {
 		"!", "\\!", "`", "\\`",
 	)
 	return replacer.Replace(s)
+}
+
+// registerCommands registers the bot's slash commands with Telegram so they
+// appear in the command menu for users.
+func (b *Bot) registerCommands() {
+	commands := tgbotapi.NewSetMyCommands(
+		tgbotapi.BotCommand{Command: "start", Description: "顯示歡迎訊息與使用說明"},
+		tgbotapi.BotCommand{Command: "help", Description: "顯示幫助說明"},
+		tgbotapi.BotCommand{Command: "save", Description: "保存 Prompt：/save 名稱 內容"},
+		tgbotapi.BotCommand{Command: "list", Description: "列出所有已保存的 Prompt"},
+		tgbotapi.BotCommand{Command: "history", Description: "查看最近使用過的 Prompt 記錄"},
+		tgbotapi.BotCommand{Command: "setdefault", Description: "設定預設 Prompt"},
+		tgbotapi.BotCommand{Command: "settings", Description: "調整畫質與模型設定"},
+		tgbotapi.BotCommand{Command: "delete", Description: "刪除已保存的 Prompt"},
+		tgbotapi.BotCommand{Command: "service", Description: "管理 AI 服務（新增/切換/刪除）"},
+		tgbotapi.BotCommand{Command: "queue", Description: "查看待重試任務佇列狀態"},
+		tgbotapi.BotCommand{Command: "errors", Description: "查看最近的錯誤記錄"},
+		tgbotapi.BotCommand{Command: "state", Description: "查看專案磁碟與資料庫使用狀態"},
+	)
+	if _, err := b.api.Request(commands); err != nil {
+		log.Printf("註冊斜線指令失敗: %v", err)
+	}
+}
+
+// formatSize formats a byte count into a human-readable string using MB or GB.
+func formatSize(bytes int64) string {
+	const (
+		mb = 1024 * 1024
+		gb = 1024 * 1024 * 1024
+	)
+	if bytes >= gb {
+		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(gb))
+	}
+	return fmt.Sprintf("%.2f MB", float64(bytes)/float64(mb))
+}
+
+// walkDirSize walks a directory and returns total size and a per-extension breakdown.
+func walkDirSize(root string) (total int64, extSizes map[string]int64) {
+	extSizes = make(map[string]int64)
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		size := info.Size()
+		total += size
+		ext := strings.ToLower(filepath.Ext(info.Name()))
+		if ext == "" {
+			ext = "(no ext)"
+		}
+		extSizes[ext] += size
+		return nil
+	})
+	return
+}
+
+func (b *Bot) cmdState(msg *tgbotapi.Message) {
+	dataDir := b.config.DataDir
+
+	// SQLite database size
+	dbPath := filepath.Join(dataDir, "bot.db")
+	var dbSize int64
+	if info, err := os.Stat(dbPath); err == nil {
+		dbSize = info.Size()
+	}
+
+	// Walk the entire data directory
+	totalSize, extSizes := walkDirSize(dataDir)
+
+	// Categorise: images
+	imageExts := map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".bmp": true}
+	var imageSize int64
+	for ext, size := range extSizes {
+		if imageExts[ext] {
+			imageSize += size
+		}
+	}
+
+	// Categorise: markdown
+	mdSize := extSizes[".md"]
+
+	// Other = total - db - images - md
+	otherSize := totalSize - dbSize - imageSize - mdSize
+	if otherSize < 0 {
+		otherSize = 0
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📊 *專案磁碟使用狀態*\n\n")
+	sb.WriteString(fmt.Sprintf("🗄 SQLite 資料庫：%s\n", formatSize(dbSize)))
+	sb.WriteString(fmt.Sprintf("📝 Markdown 檔案：%s\n", formatSize(mdSize)))
+	sb.WriteString(fmt.Sprintf("🖼 圖片檔案：%s\n", formatSize(imageSize)))
+	sb.WriteString(fmt.Sprintf("📁 其他檔案：%s\n", formatSize(otherSize)))
+	sb.WriteString(fmt.Sprintf("\n💾 資料目錄總計：%s", formatSize(totalSize)))
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, sb.String())
+	reply.ParseMode = "Markdown"
+	b.api.Send(reply)
 }
 
 func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
