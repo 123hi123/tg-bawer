@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"tg-bawer/database"
 	"tg-bawer/gemini"
 	"tg-bawer/grok"
 
@@ -26,6 +27,12 @@ func (b *Bot) cmdService(msg *tgbotapi.Message) {
 	case "list":
 		b.sendServiceList(msg)
 	case "add":
+		// Reject /service add in group chats to protect API keys
+		if !msg.Chat.IsPrivate() {
+			b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, msg.MessageID))
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "🔒 為了安全，請私聊 Bot 新增服務"))
+			return
+		}
 		b.cmdServiceAdd(msg, args)
 	case "use":
 		b.cmdServiceUse(msg, args)
@@ -82,6 +89,8 @@ func (b *Bot) sendServiceHelp(msg *tgbotapi.Message) {
 }
 
 func (b *Bot) sendServiceList(msg *tgbotapi.Message) {
+	isPrivate := msg.Chat.IsPrivate()
+
 	services, err := b.db.GetUserServices(msg.From.ID)
 	if err != nil {
 		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 讀取服務列表失敗："+err.Error()))
@@ -89,55 +98,102 @@ func (b *Bot) sendServiceList(msg *tgbotapi.Message) {
 	}
 
 	var lines []string
-	lines = append(lines, "🔌 你的服務列表：")
 
-	for _, service := range services {
-		defaultMark := ""
-		if service.IsDefault {
-			defaultMark = " [預設]"
-		}
-		publicMark := " [私人]"
-		if service.IsPublic {
-			publicMark = " [公開]"
-		}
+	if isPrivate {
+		// Private chat: show full details
+		lines = append(lines, "🔌 你的服務列表：")
 
-		detail := fmt.Sprintf(
-			"#%d %s (%s)%s%s key=%s",
-			service.ID,
-			service.Name,
-			service.Type,
-			defaultMark,
-			publicMark,
-			maskSecret(service.APIKey),
-		)
-
-		if (service.Type == gemini.ServiceTypeCustom || service.Type == grok.ServiceTypeGrok) && service.BaseURL != "" {
-			detail += " base=" + service.BaseURL
-		}
-
-		if service.Type == gemini.ServiceTypeVertex {
-			if service.ProjectID != "" && service.Location != "" {
-				detail += fmt.Sprintf(" project=%s location=%s", service.ProjectID, service.Location)
-			} else {
-				detail += " mode=express"
+		for _, service := range services {
+			defaultMark := ""
+			if service.IsDefault {
+				defaultMark = " [預設]"
 			}
-			if service.Model != "" {
-				detail += " model=" + service.Model
+			publicMark := " [私人]"
+			if service.IsPublic {
+				publicMark = " [公開]"
 			}
-			if service.BaseURL != "" {
+
+			detail := fmt.Sprintf(
+				"#%d %s (%s)%s%s key=%s",
+				service.ID,
+				service.Name,
+				service.Type,
+				defaultMark,
+				publicMark,
+				maskSecret(service.APIKey),
+			)
+
+			if (service.Type == gemini.ServiceTypeCustom || service.Type == grok.ServiceTypeGrok) && service.BaseURL != "" {
 				detail += " base=" + service.BaseURL
 			}
+
+			if service.Type == gemini.ServiceTypeVertex {
+				if service.ProjectID != "" && service.Location != "" {
+					detail += fmt.Sprintf(" project=%s location=%s", service.ProjectID, service.Location)
+				} else {
+					detail += " mode=express"
+				}
+				if service.Model != "" {
+					detail += " model=" + service.Model
+				}
+				if service.BaseURL != "" {
+					detail += " base=" + service.BaseURL
+				}
+			}
+
+			lines = append(lines, detail)
 		}
 
-		lines = append(lines, detail)
-	}
+		if len(services) == 0 {
+			lines = append(lines, "（尚未新增服務）")
+		}
 
-	if len(services) == 0 {
-		lines = append(lines, "（尚未新增服務）")
-	}
+		if strings.TrimSpace(b.config.GeminiAPIKey) != "" {
+			lines = append(lines, "ENV fallback: GEMINI_API_KEY 已設定")
+		}
 
-	if strings.TrimSpace(b.config.GeminiAPIKey) != "" {
-		lines = append(lines, "ENV fallback: GEMINI_API_KEY 已設定")
+		// Show available public shared services (name + type only, no sensitive info)
+		publicServices, err := b.db.GetPublicServices()
+		if err == nil {
+			sharedLines := b.formatSharedServicesPrivate(publicServices, msg.From.ID)
+			if len(sharedLines) > 0 {
+				lines = append(lines, "")
+				lines = append(lines, "🌐 可用的共用服務：")
+				lines = append(lines, sharedLines...)
+			}
+		}
+	} else {
+		// Group chat: hide all sensitive info
+		lines = append(lines, "🔌 你的服務列表（群組模式，隱藏敏感資訊）：")
+
+		for _, service := range services {
+			defaultMark := ""
+			if service.IsDefault {
+				defaultMark = " [預設]"
+			}
+			publicMark := " [私人]"
+			if service.IsPublic {
+				publicMark = " [公開]"
+			}
+			lines = append(lines, fmt.Sprintf("#%d %s (%s)%s%s", service.ID, service.Name, service.Type, defaultMark, publicMark))
+		}
+
+		if len(services) == 0 {
+			lines = append(lines, "（尚未新增服務）")
+		}
+
+		// Show shared public services (no sensitive info)
+		publicServices, err := b.db.GetPublicServices()
+		if err == nil {
+			sharedLines := b.formatSharedServicesGroup(publicServices, msg.From.ID)
+			if len(sharedLines) > 0 {
+				lines = append(lines, "")
+				lines = append(lines, sharedLines...)
+			}
+		}
+
+		lines = append(lines, "")
+		lines = append(lines, "💡 私聊 Bot 可查看完整資訊")
 	}
 
 	lines = append(lines, "")
@@ -374,6 +430,7 @@ func (b *Bot) cmdServicePublic(msg *tgbotapi.Message, args []string) {
 
 // resolveAllServiceConfigs returns all available Gemini/Google service configs for a user (for rotation).
 // Grok services are excluded here; use resolveGrokClient for those.
+// If the user has no services configured, public services from other users are used as a fallback.
 func (b *Bot) resolveAllServiceConfigs(userID int64) ([]gemini.ServiceConfig, error) {
 	services, err := b.db.GetAllUserServices(userID)
 	if err != nil {
@@ -382,8 +439,10 @@ func (b *Bot) resolveAllServiceConfigs(userID int64) ([]gemini.ServiceConfig, er
 
 	var configs []gemini.ServiceConfig
 	for _, service := range services {
+		// Grok services use a different API and client; skip them here.
+		// Use resolveGrokClient() instead for Grok-based generation.
 		if service.Type == grok.ServiceTypeGrok {
-			continue // grok services are handled separately
+			continue
 		}
 		configs = append(configs, gemini.ServiceConfig{
 			Type:      service.Type,
@@ -394,6 +453,27 @@ func (b *Bot) resolveAllServiceConfigs(userID int64) ([]gemini.ServiceConfig, er
 			Location:  service.Location,
 			Model:     service.Model,
 		})
+	}
+
+	// If user has no own services, fall back to public services from other users
+	if len(configs) == 0 {
+		publicServices, err := b.db.GetPublicServices()
+		if err == nil {
+			for _, service := range publicServices {
+				if service.UserID == userID || service.Type == grok.ServiceTypeGrok {
+					continue
+				}
+				configs = append(configs, gemini.ServiceConfig{
+					Type:      service.Type,
+					Name:      service.Name,
+					APIKey:    service.APIKey,
+					BaseURL:   service.BaseURL,
+					ProjectID: service.ProjectID,
+					Location:  service.Location,
+					Model:     service.Model,
+				})
+			}
+		}
 	}
 
 	if len(configs) == 0 && strings.TrimSpace(b.config.GeminiAPIKey) != "" {
@@ -411,7 +491,8 @@ func (b *Bot) resolveAllServiceConfigs(userID int64) ([]gemini.ServiceConfig, er
 
 // resolveGrokClient returns a Grok client for the given user.
 // It first checks the user's DB-configured Grok services (default first), then falls back to
-// the environment-variable-configured client. Returns nil if no Grok service is available.
+// public Grok services from other users, then to the environment-variable-configured client.
+// Returns nil if no Grok service is available.
 func (b *Bot) resolveGrokClient(userID int64) *grok.Client {
 	services, err := b.db.GetAllUserServices(userID)
 	if err == nil {
@@ -422,6 +503,17 @@ func (b *Bot) resolveGrokClient(userID int64) *grok.Client {
 			}
 		}
 	}
+
+	// Fall back to public Grok services from other users
+	publicServices, err := b.db.GetPublicServices()
+	if err == nil {
+		for _, s := range publicServices {
+			if s.UserID != userID && s.Type == grok.ServiceTypeGrok {
+				return grok.NewClient(s.APIKey, s.BaseURL, "", "", "")
+			}
+		}
+	}
+
 	if b.grokClient.Available() {
 		return b.grokClient
 	}
@@ -450,4 +542,28 @@ func maskSecret(secret string) string {
 		return "****"
 	}
 	return trimmed[:4] + "..." + trimmed[len(trimmed)-4:]
+}
+
+// formatSharedServicesPrivate returns display lines for public services from other users,
+// for use in private chat (shows name and type only, no sensitive info).
+func (b *Bot) formatSharedServicesPrivate(publicServices []database.UserService, ownerID int64) []string {
+	var lines []string
+	for _, s := range publicServices {
+		if s.UserID != ownerID {
+			lines = append(lines, fmt.Sprintf("• %s (%s)", s.Name, s.Type))
+		}
+	}
+	return lines
+}
+
+// formatSharedServicesGroup returns display lines for public services from other users,
+// for use in group chat (shows name and type only, no sensitive info).
+func (b *Bot) formatSharedServicesGroup(publicServices []database.UserService, ownerID int64) []string {
+	var lines []string
+	for _, s := range publicServices {
+		if s.UserID != ownerID {
+			lines = append(lines, fmt.Sprintf("🌐 %s (%s) — 由其他使用者共享", s.Name, s.Type))
+		}
+	}
+	return lines
 }
