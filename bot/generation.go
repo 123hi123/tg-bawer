@@ -290,7 +290,9 @@ func (b *Bot) runGrokVideoTask(
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// Build image URL from first downloaded image if available
+	// Build image URL from first downloaded image if available.
+	// The Grok video API accepts a single reference image; imageFileIDs is kept
+	// for labeling (圖生影片) and for sending original images as follow-up replies.
 	imageURL := ""
 	if len(downloadedImages) > 0 {
 		imageURL = "data:" + downloadedImages[0].MimeType + ";base64," + base64.StdEncoding.EncodeToString(downloadedImages[0].Data)

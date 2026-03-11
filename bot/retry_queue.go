@@ -245,7 +245,7 @@ func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failed
 	if dlErr != nil {
 		log.Printf("下載重試影片原圖失敗 (id=%d): %v", task.ID, dlErr)
 	}
-	if len(downloadedImages) > 0 {
+	if dlErr == nil && len(downloadedImages) > 0 {
 		imageURL = "data:" + downloadedImages[0].MimeType + ";base64," + base64.StdEncoding.EncodeToString(downloadedImages[0].Data)
 	}
 
