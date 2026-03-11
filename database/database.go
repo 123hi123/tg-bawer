@@ -192,6 +192,25 @@ func (d *Database) init() error {
 	// Create index on failed_generations for efficient per-user lookups
 	d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_failed_generations_user ON failed_generations(user_id)`)
 
+	// 建立 Bot 回覆訊息與提示詞追蹤表
+	_, err = d.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bot_reply_prompts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			chat_id INTEGER NOT NULL,
+			message_id INTEGER NOT NULL,
+			prompt TEXT NOT NULL,
+			caption TEXT NOT NULL DEFAULT '',
+			media_type TEXT NOT NULL DEFAULT 'photo',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(chat_id, message_id)
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_bot_reply_prompts_chat ON bot_reply_prompts(chat_id)`)
+
 	return nil
 }
 
@@ -819,4 +838,77 @@ type UserImageQueueItem struct {
 	LocalPath string
 	RefCount  int
 	CreatedAt time.Time
+}
+
+// BotReplyPrompt tracks a bot-sent message and the prompt used to generate it.
+type BotReplyPrompt struct {
+	ID        int64
+	ChatID    int64
+	MessageID int
+	Prompt    string
+	Caption   string
+	MediaType string
+	CreatedAt time.Time
+}
+
+// SaveBotReplyPrompt stores a bot reply message ID with its associated prompt.
+func (d *Database) SaveBotReplyPrompt(chatID int64, messageID int, prompt, caption, mediaType string) error {
+	_, err := d.db.Exec(`
+		INSERT OR REPLACE INTO bot_reply_prompts (chat_id, message_id, prompt, caption, media_type)
+		VALUES (?, ?, ?, ?, ?)
+	`, chatID, messageID, prompt, caption, mediaType)
+	return err
+}
+
+// GetBotReplyPromptsByChat returns all tracked bot reply prompts for a specific chat.
+func (d *Database) GetBotReplyPromptsByChat(chatID int64) ([]BotReplyPrompt, error) {
+	rows, err := d.db.Query(`
+		SELECT id, chat_id, message_id, prompt, caption, media_type, created_at
+		FROM bot_reply_prompts
+		WHERE chat_id = ?
+		ORDER BY created_at ASC
+	`, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []BotReplyPrompt
+	for rows.Next() {
+		var item BotReplyPrompt
+		if err := rows.Scan(&item.ID, &item.ChatID, &item.MessageID, &item.Prompt, &item.Caption, &item.MediaType, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+// GetAllBotReplyPrompts returns all tracked bot reply prompts across all chats.
+func (d *Database) GetAllBotReplyPrompts() ([]BotReplyPrompt, error) {
+	rows, err := d.db.Query(`
+		SELECT id, chat_id, message_id, prompt, caption, media_type, created_at
+		FROM bot_reply_prompts
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []BotReplyPrompt
+	for rows.Next() {
+		var item BotReplyPrompt
+		if err := rows.Scan(&item.ID, &item.ChatID, &item.MessageID, &item.Prompt, &item.Caption, &item.MediaType, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+// DeleteBotReplyPrompt removes a tracked bot reply prompt by ID.
+func (d *Database) DeleteBotReplyPrompt(id int64) error {
+	_, err := d.db.Exec(`DELETE FROM bot_reply_prompts WHERE id = ?`, id)
+	return err
 }

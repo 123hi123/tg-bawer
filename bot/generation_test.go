@@ -100,3 +100,64 @@ func TestBuildTaskSummary_Empty(t *testing.T) {
 		t.Fatalf("expected empty summary, got: %s", summary)
 	}
 }
+
+func TestBuildCaptionWithPrompt_Normal(t *testing.T) {
+	caption := buildCaptionWithPrompt("🌐 Google 圖片", "畫一隻貓")
+	if !strings.Contains(caption, "🌐 Google 圖片") {
+		t.Fatalf("expected label in caption, got: %s", caption)
+	}
+	if !strings.Contains(caption, "<blockquote expandable>") {
+		t.Fatalf("expected expandable blockquote, got: %s", caption)
+	}
+	if !strings.Contains(caption, "畫一隻貓") {
+		t.Fatalf("expected prompt in caption, got: %s", caption)
+	}
+	if !strings.Contains(caption, "</blockquote>") {
+		t.Fatalf("expected closing blockquote, got: %s", caption)
+	}
+}
+
+func TestBuildCaptionWithPrompt_EmptyPrompt(t *testing.T) {
+	caption := buildCaptionWithPrompt("🌐 Google 圖片", "")
+	if caption != "🌐 Google 圖片" {
+		t.Fatalf("expected label only when prompt is empty, got: %s", caption)
+	}
+}
+
+func TestBuildCaptionWithPrompt_HTMLEscape(t *testing.T) {
+	caption := buildCaptionWithPrompt("label", "<script>alert('xss')</script>")
+	if strings.Contains(caption, "<script>") {
+		t.Fatalf("expected HTML-escaped prompt, got: %s", caption)
+	}
+	if !strings.Contains(caption, "&lt;script&gt;") {
+		t.Fatalf("expected escaped angle brackets, got: %s", caption)
+	}
+}
+
+func TestBuildCaptionWithPrompt_LongPrompt(t *testing.T) {
+	longPrompt := strings.Repeat("a", 1000)
+	caption := buildCaptionWithPrompt("label", longPrompt)
+	// The prompt should be truncated to 900 runes + "..."
+	if !strings.Contains(caption, "...") {
+		t.Fatalf("expected truncation indicator, got: %s", caption)
+	}
+	// Verify the prompt content is truncated (900 'a's not 1000)
+	if strings.Contains(caption, strings.Repeat("a", 901)) {
+		t.Fatalf("expected truncation at 900 runes")
+	}
+}
+
+func TestBuildCaptionWithPrompt_MultiByteTruncation(t *testing.T) {
+	// Use CJK characters (3 bytes each in UTF-8) near the boundary
+	longPrompt := strings.Repeat("你", 950)
+	caption := buildCaptionWithPrompt("label", longPrompt)
+	if !strings.Contains(caption, "...") {
+		t.Fatalf("expected truncation indicator, got: %s", caption)
+	}
+	// Verify no corrupted multi-byte characters by checking valid UTF-8
+	for _, r := range caption {
+		if r == '\uFFFD' {
+			t.Fatalf("found replacement character, indicating corrupted UTF-8")
+		}
+	}
+}

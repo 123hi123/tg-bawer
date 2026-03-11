@@ -388,3 +388,73 @@ func TestImageQueue(t *testing.T) {
 		t.Fatalf("expected file1 with ref_count=1, got %+v", items[0])
 	}
 }
+
+func TestBotReplyPromptCRUD(t *testing.T) {
+	db, err := NewDatabase(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabase failed: %v", err)
+	}
+	defer db.Close()
+
+	// Save some reply prompts
+	if err := db.SaveBotReplyPrompt(100, 1, "draw a cat", "🌐 Google 圖片", "photo"); err != nil {
+		t.Fatalf("SaveBotReplyPrompt failed: %v", err)
+	}
+	if err := db.SaveBotReplyPrompt(100, 2, "draw a dog", "🤖 Grok 圖片", "photo"); err != nil {
+		t.Fatalf("SaveBotReplyPrompt second failed: %v", err)
+	}
+	if err := db.SaveBotReplyPrompt(200, 3, "video prompt", "🎬 Grok 影片", "video"); err != nil {
+		t.Fatalf("SaveBotReplyPrompt other chat failed: %v", err)
+	}
+
+	// Get by chat
+	items, err := db.GetBotReplyPromptsByChat(100)
+	if err != nil {
+		t.Fatalf("GetBotReplyPromptsByChat failed: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items for chat 100, got %d", len(items))
+	}
+	if items[0].Prompt != "draw a cat" || items[0].Caption != "🌐 Google 圖片" {
+		t.Fatalf("unexpected first item: %+v", items[0])
+	}
+	if items[1].Prompt != "draw a dog" {
+		t.Fatalf("unexpected second item: %+v", items[1])
+	}
+
+	// Get all
+	all, err := db.GetAllBotReplyPrompts()
+	if err != nil {
+		t.Fatalf("GetAllBotReplyPrompts failed: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 total items, got %d", len(all))
+	}
+
+	// Delete
+	if err := db.DeleteBotReplyPrompt(items[0].ID); err != nil {
+		t.Fatalf("DeleteBotReplyPrompt failed: %v", err)
+	}
+	items, err = db.GetBotReplyPromptsByChat(100)
+	if err != nil {
+		t.Fatalf("GetBotReplyPromptsByChat after delete failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after delete, got %d", len(items))
+	}
+
+	// Upsert (same chat_id + message_id should replace)
+	if err := db.SaveBotReplyPrompt(100, 2, "updated prompt", "🤖 Grok 圖片", "photo"); err != nil {
+		t.Fatalf("SaveBotReplyPrompt upsert failed: %v", err)
+	}
+	items, err = db.GetBotReplyPromptsByChat(100)
+	if err != nil {
+		t.Fatalf("GetBotReplyPromptsByChat after upsert failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after upsert, got %d", len(items))
+	}
+	if items[0].Prompt != "updated prompt" {
+		t.Fatalf("expected updated prompt, got %s", items[0].Prompt)
+	}
+}
