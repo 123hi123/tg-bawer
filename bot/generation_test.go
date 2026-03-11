@@ -137,11 +137,27 @@ func TestBuildCaptionWithPrompt_HTMLEscape(t *testing.T) {
 func TestBuildCaptionWithPrompt_LongPrompt(t *testing.T) {
 	longPrompt := strings.Repeat("a", 1000)
 	caption := buildCaptionWithPrompt("label", longPrompt)
-	// The prompt should be truncated to 900 chars + "..."
-	if len(caption) > 1024 {
-		t.Fatalf("caption exceeds 1024 chars: len=%d", len(caption))
-	}
+	// The prompt should be truncated to 900 runes + "..."
 	if !strings.Contains(caption, "...") {
 		t.Fatalf("expected truncation indicator, got: %s", caption)
+	}
+	// Verify the prompt content is truncated (900 'a's not 1000)
+	if strings.Contains(caption, strings.Repeat("a", 901)) {
+		t.Fatalf("expected truncation at 900 runes")
+	}
+}
+
+func TestBuildCaptionWithPrompt_MultiByteTruncation(t *testing.T) {
+	// Use CJK characters (3 bytes each in UTF-8) near the boundary
+	longPrompt := strings.Repeat("你", 950)
+	caption := buildCaptionWithPrompt("label", longPrompt)
+	if !strings.Contains(caption, "...") {
+		t.Fatalf("expected truncation indicator, got: %s", caption)
+	}
+	// Verify no corrupted multi-byte characters by checking valid UTF-8
+	for _, r := range caption {
+		if r == '\uFFFD' {
+			t.Fatalf("found replacement character, indicating corrupted UTF-8")
+		}
 	}
 }

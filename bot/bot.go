@@ -1224,13 +1224,15 @@ func buildCaptionWithPrompt(label, prompt string) string {
 	if prompt == "" {
 		return label
 	}
-	escaped := html.EscapeString(prompt)
-	// Telegram caption limit is 1024 characters; leave room for label + HTML tags.
-	const maxPromptLen = 900
-	if len(escaped) > maxPromptLen {
-		escaped = escaped[:maxPromptLen] + "..."
+	// Truncate by runes before escaping to avoid splitting multi-byte characters
+	// or HTML entities. Telegram caption limit is 1024 characters.
+	const maxPromptRunes = 900
+	runes := []rune(prompt)
+	if len(runes) > maxPromptRunes {
+		prompt = string(runes[:maxPromptRunes]) + "..."
 	}
-	return fmt.Sprintf("%s\n\n<blockquote expandable>%s</blockquote>", html.EscapeString(label), escaped)
+	escaped := html.EscapeString(prompt)
+	return fmt.Sprintf("%s\n\n<blockquote expandable>%s</blockquote>", label, escaped)
 }
 
 // noServiceSetupText is the tutorial text shown when a user has no configured services.
