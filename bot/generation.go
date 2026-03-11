@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"strings"
@@ -91,7 +92,7 @@ func (b *Bot) runAllGenerationTasks(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			b.runGrokVideoTask(gc, msg, replyToMsgID, prompt)
+			b.runGrokVideoTask(gc, msg, replyToMsgID, prompt, downloadedImages, imageFileIDs)
 		}()
 	}
 
@@ -140,6 +141,7 @@ func (b *Bot) runGoogleImageTask(
 			label = "🌐 Google 圖片"
 		}
 	}
+	label += generationTypeLabel(len(downloadedImages) > 0, "image")
 
 	// Override model in service configs if requested
 	services := allServices
@@ -196,12 +198,13 @@ func (b *Bot) runGoogleImageTask(
 	// Send compressed preview
 	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "google_preview.png", Bytes: result.ImageData})
 	photoMsg.ReplyToMessageID = replyToMsgID
-	photoMsg.Caption = buildCaptionWithPrompt(label, prompt)
+	photoMsg.Caption = buildCaptionForResult(label, prompt)
 	photoMsg.ParseMode = "HTML"
 	if sentMsg, err := b.api.Send(photoMsg); err != nil {
 		log.Printf("發送 Google 預覽圖失敗: %v", err)
 	} else {
 		b.db.SaveBotReplyPrompt(msg.Chat.ID, sentMsg.MessageID, prompt, label, "photo")
+		b.sendFollowUpMessages(msg.Chat.ID, sentMsg.MessageID, prompt, imageFileIDs)
 	}
 
 	// Send full-quality document for 2K/4K
@@ -261,12 +264,14 @@ func (b *Bot) runGrokImageTask(
 
 	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "grok_preview.png", Bytes: result.ImageData})
 	photoMsg.ReplyToMessageID = replyToMsgID
-	photoMsg.Caption = buildCaptionWithPrompt("🤖 Grok 圖片", prompt)
+	label := "🎭 Grok 圖片" + generationTypeLabel(len(downloadedImages) > 0, "image")
+	photoMsg.Caption = buildCaptionForResult(label, prompt)
 	photoMsg.ParseMode = "HTML"
 	if sentMsg, err := b.api.Send(photoMsg); err != nil {
 		log.Printf("發送 Grok 預覽圖失敗: %v", err)
 	} else {
-		b.db.SaveBotReplyPrompt(msg.Chat.ID, sentMsg.MessageID, prompt, "🤖 Grok 圖片", "photo")
+		b.db.SaveBotReplyPrompt(msg.Chat.ID, sentMsg.MessageID, prompt, label, "photo")
+		b.sendFollowUpMessages(msg.Chat.ID, sentMsg.MessageID, prompt, imageFileIDs)
 	}
 
 	return true
@@ -279,15 +284,23 @@ func (b *Bot) runGrokVideoTask(
 	msg *tgbotapi.Message,
 	replyToMsgID int,
 	prompt string,
+	downloadedImages []gemini.DownloadedImage,
+	imageFileIDs []string,
 ) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	// Build image URL from first downloaded image if available
+	imageURL := ""
+	if len(downloadedImages) > 0 {
+		imageURL = "data:" + downloadedImages[0].MimeType + ";base64," + base64.StdEncoding.EncodeToString(downloadedImages[0].Data)
+	}
 
 	var result *grok.VideoResult
 	var lastErr error
 
 	for attempt := 0; attempt < 6; attempt++ {
-		result, lastErr = gc.GenerateVideo(ctx, prompt, "")
+		result, lastErr = gc.GenerateVideo(ctx, prompt, imageURL)
 		if lastErr == nil && result != nil && len(result.VideoData) > 0 {
 			break
 		}
@@ -300,20 +313,23 @@ func (b *Bot) runGrokVideoTask(
 
 	if result == nil || len(result.VideoData) == 0 {
 		b.enqueueFailedGeneration(msg, replyToMsgID, failedGenerationPayload{
-			Prompt: prompt,
+			Prompt:       prompt,
+			ImageFileIDs: imageFileIDs,
 		}, lastErr, taskTypeGrokVideo)
 		log.Printf("Grok 影片生成失敗，已加入重試佇列")
 		return
 	}
 
+	label := "🎬 Grok 影片" + generationTypeLabel(len(downloadedImages) > 0, "video")
 	videoMsg := tgbotapi.NewVideo(msg.Chat.ID, tgbotapi.FileBytes{Name: "generated.mp4", Bytes: result.VideoData})
 	videoMsg.ReplyToMessageID = replyToMsgID
-	videoMsg.Caption = buildCaptionWithPrompt("🎬 Grok 影片", prompt)
+	videoMsg.Caption = buildCaptionForResult(label, prompt)
 	videoMsg.ParseMode = "HTML"
 	if sentMsg, err := b.api.Send(videoMsg); err != nil {
 		log.Printf("上傳影片失敗: %v", err)
 	} else {
-		b.db.SaveBotReplyPrompt(msg.Chat.ID, sentMsg.MessageID, prompt, "🎬 Grok 影片", "video")
+		b.db.SaveBotReplyPrompt(msg.Chat.ID, sentMsg.MessageID, prompt, label, "video")
+		b.sendFollowUpMessages(msg.Chat.ID, sentMsg.MessageID, prompt, imageFileIDs)
 	}
 }
 
@@ -338,7 +354,7 @@ func buildTaskSummary(allServices []gemini.ServiceConfig, extraGoogleModels []st
 		if hasImages {
 			imgModel = gc.EditModel()
 		}
-		lines = append(lines, fmt.Sprintf("• 🤖 Grok `%s` 正在繪製", imgModel))
+		lines = append(lines, fmt.Sprintf("• 🎭 Grok `%s` 正在繪製", imgModel))
 		lines = append(lines, fmt.Sprintf("• 🎬 Grok `%s` 正在製作", gc.VideoModel()))
 	}
 

@@ -86,7 +86,7 @@ func TestBuildTaskSummary_AllTasks(t *testing.T) {
 	if !strings.Contains(summary, "⚡") {
 		t.Fatal("expected Flash icon")
 	}
-	if !strings.Contains(summary, "🤖") {
+	if !strings.Contains(summary, "🎭") {
 		t.Fatal("expected Grok image icon")
 	}
 	if !strings.Contains(summary, "🎬") {
@@ -158,6 +158,63 @@ func TestBuildCaptionWithPrompt_MultiByteTruncation(t *testing.T) {
 	for _, r := range caption {
 		if r == '\uFFFD' {
 			t.Fatalf("found replacement character, indicating corrupted UTF-8")
+		}
+	}
+}
+
+func TestIsLongPrompt(t *testing.T) {
+	short := strings.Repeat("a", 899)
+	if isLongPrompt(short) {
+		t.Fatalf("expected short prompt (899 runes) to not be long")
+	}
+
+	exact := strings.Repeat("a", 900)
+	if !isLongPrompt(exact) {
+		t.Fatalf("expected prompt at threshold (900 runes) to be long")
+	}
+
+	long := strings.Repeat("你", 900)
+	if !isLongPrompt(long) {
+		t.Fatalf("expected CJK prompt at threshold to be long")
+	}
+}
+
+func TestBuildCaptionForResult_Short(t *testing.T) {
+	caption := buildCaptionForResult("🌐 Google 圖片 | 文生圖", "畫一隻貓")
+	if !strings.Contains(caption, "🌐 Google 圖片 | 文生圖") {
+		t.Fatalf("expected label in caption, got: %s", caption)
+	}
+	if !strings.Contains(caption, "<blockquote expandable>") {
+		t.Fatalf("expected expandable blockquote for short prompt, got: %s", caption)
+	}
+	if !strings.Contains(caption, "畫一隻貓") {
+		t.Fatalf("expected prompt in caption, got: %s", caption)
+	}
+}
+
+func TestBuildCaptionForResult_Long(t *testing.T) {
+	longPrompt := strings.Repeat("a", 1000)
+	caption := buildCaptionForResult("🌐 Google 圖片 | 文生圖", longPrompt)
+	if caption != "🌐 Google 圖片 | 文生圖" {
+		t.Fatalf("expected label only for long prompt, got: %s", caption)
+	}
+}
+
+func TestGenerationTypeLabel(t *testing.T) {
+	tests := []struct {
+		hasImages bool
+		mediaType string
+		expected  string
+	}{
+		{false, "image", " | 文生圖"},
+		{true, "image", " | 圖生圖"},
+		{false, "video", " | 文生影片"},
+		{true, "video", " | 圖生影片"},
+	}
+	for _, tt := range tests {
+		got := generationTypeLabel(tt.hasImages, tt.mediaType)
+		if got != tt.expected {
+			t.Errorf("generationTypeLabel(%v, %q) = %q, want %q", tt.hasImages, tt.mediaType, got, tt.expected)
 		}
 	}
 }

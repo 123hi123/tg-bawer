@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -238,10 +239,20 @@ func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failed
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	// Build image URL from stored file IDs if available
+	imageURL := ""
+	downloadedImages, dlErr := b.downloadImagesByFileIDs(payload.ImageFileIDs)
+	if dlErr != nil {
+		log.Printf("下載重試影片原圖失敗 (id=%d): %v", task.ID, dlErr)
+	}
+	if len(downloadedImages) > 0 {
+		imageURL = "data:" + downloadedImages[0].MimeType + ";base64," + base64.StdEncoding.EncodeToString(downloadedImages[0].Data)
+	}
+
 	var videoResult *grok.VideoResult
 	var lastErr error
 	for attempt := 0; attempt < 6; attempt++ {
-		videoResult, lastErr = gc.GenerateVideo(ctx, payload.Prompt, "")
+		videoResult, lastErr = gc.GenerateVideo(ctx, payload.Prompt, imageURL)
 		if lastErr == nil && videoResult != nil && len(videoResult.VideoData) > 0 {
 			break
 		}
@@ -271,14 +282,16 @@ func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failed
 	}
 	b.api.Send(notice)
 
+	label := "🎬 定時重試影片" + generationTypeLabel(len(payload.ImageFileIDs) > 0, "video")
 	videoMsg := tgbotapi.NewVideo(task.ChatID, tgbotapi.FileBytes{Name: "retry_generated.mp4", Bytes: videoResult.VideoData})
 	if task.ReplyToMessageID > 0 {
 		videoMsg.ReplyToMessageID = int(task.ReplyToMessageID)
 	}
-	videoMsg.Caption = buildCaptionWithPrompt("🎬 定時重試影片", payload.Prompt)
+	videoMsg.Caption = buildCaptionForResult(label, payload.Prompt)
 	videoMsg.ParseMode = "HTML"
 	if sentMsg, err := b.api.Send(videoMsg); err == nil {
-		b.db.SaveBotReplyPrompt(task.ChatID, sentMsg.MessageID, payload.Prompt, "🎬 定時重試影片", "video")
+		b.db.SaveBotReplyPrompt(task.ChatID, sentMsg.MessageID, payload.Prompt, label, "video")
+		b.sendFollowUpMessages(task.ChatID, sentMsg.MessageID, payload.Prompt, payload.ImageFileIDs)
 	}
 
 	if err := b.db.DeleteFailedGeneration(task.ID); err != nil {
@@ -319,11 +332,12 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 
 	// Build a human-readable label for the result source
 	var sourceLabel string
+	hasImages := len(payload.ImageFileIDs) > 0
 	switch resultSource {
 	case taskTypeGrokImage:
-		sourceLabel = "🤖 Grok 圖片"
+		sourceLabel = "🎭 Grok 圖片" + generationTypeLabel(hasImages, "image")
 	case taskTypeGoogleImage:
-		sourceLabel = "🌐 Google 圖片"
+		sourceLabel = "🌐 Google 圖片" + generationTypeLabel(hasImages, "image")
 	default:
 		sourceLabel = "🖼 圖片"
 		log.Printf("sendRetrySuccessResult: unexpected resultSource=%q (task #%d)", resultSource, task.ID)
@@ -344,7 +358,7 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 	if task.ReplyToMessageID > 0 {
 		photoMsg.ReplyToMessageID = int(task.ReplyToMessageID)
 	}
-	photoMsg.Caption = buildCaptionWithPrompt(sourceLabel, payload.Prompt)
+	photoMsg.Caption = buildCaptionForResult(sourceLabel, payload.Prompt)
 	photoMsg.ParseMode = "HTML"
 	sentPhoto, err := b.api.Send(photoMsg)
 	if err != nil {
@@ -355,6 +369,7 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 		return fmt.Errorf("預覽圖上傳失敗：未收到確認")
 	}
 	b.db.SaveBotReplyPrompt(task.ChatID, sentPhoto.MessageID, payload.Prompt, sourceLabel, "photo")
+	b.sendFollowUpMessages(task.ChatID, sentPhoto.MessageID, payload.Prompt, payload.ImageFileIDs)
 
 	filename := "retry_generated.png"
 	if payload.Quality != "" {

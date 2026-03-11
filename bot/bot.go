@@ -1380,6 +1380,78 @@ func buildCaptionWithPrompt(label, prompt string) string {
 	return fmt.Sprintf("%s\n\n<blockquote expandable>%s</blockquote>", label, escaped)
 }
 
+// longPromptThreshold is the rune count at which a prompt is considered "long"
+// and should be sent as a separate .txt file instead of inline in the caption.
+const longPromptThreshold = 900
+
+// isLongPrompt reports whether the prompt exceeds the threshold for inline caption display.
+func isLongPrompt(prompt string) bool {
+	return len([]rune(prompt)) >= longPromptThreshold
+}
+
+// buildCaptionForResult builds the caption for a generation result message.
+// For short prompts, the prompt is included as an expandable blockquote.
+// For long prompts (≥900 runes), only the label is returned; the prompt
+// will be sent separately as a .txt file.
+func buildCaptionForResult(label, prompt string) string {
+	if isLongPrompt(prompt) {
+		return label
+	}
+	return buildCaptionWithPrompt(label, prompt)
+}
+
+// sendPromptFile sends the full prompt as a .txt document replying to replyToMsgID.
+func (b *Bot) sendPromptFile(chatID int64, replyToMsgID int, prompt string) {
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
+		Name:  "prompt.txt",
+		Bytes: []byte(prompt),
+	})
+	doc.ReplyToMessageID = replyToMsgID
+	doc.Caption = "📝 完整提示"
+	if _, err := b.api.Send(doc); err != nil {
+		log.Printf("發送 prompt.txt 失敗: %v", err)
+	}
+}
+
+// sendSourceImages sends original images as replies to replyToMsgID.
+func (b *Bot) sendSourceImages(chatID int64, replyToMsgID int, imageFileIDs []string) {
+	for _, fileID := range imageFileIDs {
+		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(fileID))
+		photo.ReplyToMessageID = replyToMsgID
+		photo.Caption = "📄 原始圖片"
+		if _, err := b.api.Send(photo); err != nil {
+			log.Printf("發送原始圖片失敗: %v", err)
+		}
+	}
+}
+
+// generationTypeLabel returns the generation type suffix based on whether images were provided.
+func generationTypeLabel(hasImages bool, mediaType string) string {
+	switch mediaType {
+	case "video":
+		if hasImages {
+			return " | 圖生影片"
+		}
+		return " | 文生影片"
+	default:
+		if hasImages {
+			return " | 圖生圖"
+		}
+		return " | 文生圖"
+	}
+}
+
+// sendFollowUpMessages sends source images and/or prompt file as replies
+// to a generation result message when needed.
+func (b *Bot) sendFollowUpMessages(chatID int64, resultMsgID int, prompt string, imageFileIDs []string) {
+	if len(imageFileIDs) > 0 {
+		b.sendSourceImages(chatID, resultMsgID, imageFileIDs)
+	}
+	if isLongPrompt(prompt) {
+		b.sendPromptFile(chatID, resultMsgID, prompt)
+	}
+}
+
 // noServiceSetupText is the tutorial text shown when a user has no configured services.
 const noServiceSetupText = `❌ *尚未設定任何服務*
 
@@ -2252,13 +2324,17 @@ func (b *Bot) tryGenerateVideo(chatID int64, replyToMessageID int, prompt string
 	}
 
 	// Upload video to TG
+	label := "🎬 AI 生成影片" + generationTypeLabel(imageURL != "", "video")
 	videoMsg := tgbotapi.NewVideo(chatID, tgbotapi.FileBytes{Name: "generated.mp4", Bytes: videoResult.VideoData})
 	videoMsg.ReplyToMessageID = replyToMessageID
-	videoMsg.Caption = buildCaptionWithPrompt("🎬 AI 生成影片", prompt)
+	videoMsg.Caption = buildCaptionForResult(label, prompt)
 	videoMsg.ParseMode = "HTML"
 	if sentMsg, err := b.api.Send(videoMsg); err != nil {
 		log.Printf("上傳影片失敗: %v", err)
 	} else {
-		b.db.SaveBotReplyPrompt(chatID, sentMsg.MessageID, prompt, "🎬 AI 生成影片", "video")
+		b.db.SaveBotReplyPrompt(chatID, sentMsg.MessageID, prompt, label, "video")
+		if isLongPrompt(prompt) {
+			b.sendPromptFile(chatID, sentMsg.MessageID, prompt)
+		}
 	}
 }
