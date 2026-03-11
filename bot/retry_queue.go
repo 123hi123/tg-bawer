@@ -55,12 +55,19 @@ func (b *Bot) enqueueFailedGeneration(msg *tgbotapi.Message, replyToMessageID in
 	}
 }
 
+const maxConcurrentRetries = 20
+
 func (b *Bot) retryFailedGenerations() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		for i := 0; i < 3; i++ {
+		current := atomic.LoadInt32(&b.activeRetries)
+		toSpawn := maxConcurrentRetries - int(current)
+		if toSpawn <= 0 {
+			continue
+		}
+		for i := 0; i < toSpawn; i++ {
 			go b.retryOneFailedGeneration()
 		}
 	}
