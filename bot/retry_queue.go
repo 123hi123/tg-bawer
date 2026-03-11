@@ -268,8 +268,11 @@ func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failed
 	if task.ReplyToMessageID > 0 {
 		videoMsg.ReplyToMessageID = int(task.ReplyToMessageID)
 	}
-	videoMsg.Caption = "🎬 定時重試影片"
-	b.api.Send(videoMsg)
+	videoMsg.Caption = buildCaptionWithPrompt("🎬 定時重試影片", payload.Prompt)
+	videoMsg.ParseMode = "HTML"
+	if sentMsg, err := b.api.Send(videoMsg); err == nil {
+		b.db.SaveBotReplyPrompt(task.ChatID, sentMsg.MessageID, payload.Prompt, "🎬 定時重試影片", "video")
+	}
 
 	if err := b.db.DeleteFailedGeneration(task.ID); err != nil {
 		log.Printf("刪除已成功重試影片任務失敗 (id=%d): %v", task.ID, err)
@@ -334,7 +337,8 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 	if task.ReplyToMessageID > 0 {
 		photoMsg.ReplyToMessageID = int(task.ReplyToMessageID)
 	}
-	photoMsg.Caption = sourceLabel
+	photoMsg.Caption = buildCaptionWithPrompt(sourceLabel, payload.Prompt)
+	photoMsg.ParseMode = "HTML"
 	sentPhoto, err := b.api.Send(photoMsg)
 	if err != nil {
 		return fmt.Errorf("發送預覽圖失敗: %w", err)
@@ -343,6 +347,7 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 	if len(sentPhoto.Photo) == 0 {
 		return fmt.Errorf("預覽圖上傳失敗：未收到確認")
 	}
+	b.db.SaveBotReplyPrompt(task.ChatID, sentPhoto.MessageID, payload.Prompt, sourceLabel, "photo")
 
 	filename := "retry_generated.png"
 	if payload.Quality != "" {

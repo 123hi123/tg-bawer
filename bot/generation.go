@@ -196,9 +196,12 @@ func (b *Bot) runGoogleImageTask(
 	// Send compressed preview
 	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "google_preview.png", Bytes: result.ImageData})
 	photoMsg.ReplyToMessageID = replyToMsgID
-	photoMsg.Caption = label
-	if _, err := b.api.Send(photoMsg); err != nil {
+	photoMsg.Caption = buildCaptionWithPrompt(label, prompt)
+	photoMsg.ParseMode = "HTML"
+	if sentMsg, err := b.api.Send(photoMsg); err != nil {
 		log.Printf("發送 Google 預覽圖失敗: %v", err)
+	} else {
+		b.db.SaveBotReplyPrompt(msg.Chat.ID, sentMsg.MessageID, prompt, label, "photo")
 	}
 
 	// Send full-quality document for 2K/4K
@@ -258,9 +261,12 @@ func (b *Bot) runGrokImageTask(
 
 	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "grok_preview.png", Bytes: result.ImageData})
 	photoMsg.ReplyToMessageID = replyToMsgID
-	photoMsg.Caption = "🤖 Grok 圖片"
-	if _, err := b.api.Send(photoMsg); err != nil {
+	photoMsg.Caption = buildCaptionWithPrompt("🤖 Grok 圖片", prompt)
+	photoMsg.ParseMode = "HTML"
+	if sentMsg, err := b.api.Send(photoMsg); err != nil {
 		log.Printf("發送 Grok 預覽圖失敗: %v", err)
+	} else {
+		b.db.SaveBotReplyPrompt(msg.Chat.ID, sentMsg.MessageID, prompt, "🤖 Grok 圖片", "photo")
 	}
 
 	return true
@@ -302,9 +308,12 @@ func (b *Bot) runGrokVideoTask(
 
 	videoMsg := tgbotapi.NewVideo(msg.Chat.ID, tgbotapi.FileBytes{Name: "generated.mp4", Bytes: result.VideoData})
 	videoMsg.ReplyToMessageID = replyToMsgID
-	videoMsg.Caption = "🎬 Grok 影片"
-	if _, err := b.api.Send(videoMsg); err != nil {
+	videoMsg.Caption = buildCaptionWithPrompt("🎬 Grok 影片", prompt)
+	videoMsg.ParseMode = "HTML"
+	if sentMsg, err := b.api.Send(videoMsg); err != nil {
 		log.Printf("上傳影片失敗: %v", err)
+	} else {
+		b.db.SaveBotReplyPrompt(msg.Chat.ID, sentMsg.MessageID, prompt, "🎬 Grok 影片", "video")
 	}
 }
 

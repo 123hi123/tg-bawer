@@ -100,3 +100,48 @@ func TestBuildTaskSummary_Empty(t *testing.T) {
 		t.Fatalf("expected empty summary, got: %s", summary)
 	}
 }
+
+func TestBuildCaptionWithPrompt_Normal(t *testing.T) {
+	caption := buildCaptionWithPrompt("🌐 Google 圖片", "畫一隻貓")
+	if !strings.Contains(caption, "🌐 Google 圖片") {
+		t.Fatalf("expected label in caption, got: %s", caption)
+	}
+	if !strings.Contains(caption, "<blockquote expandable>") {
+		t.Fatalf("expected expandable blockquote, got: %s", caption)
+	}
+	if !strings.Contains(caption, "畫一隻貓") {
+		t.Fatalf("expected prompt in caption, got: %s", caption)
+	}
+	if !strings.Contains(caption, "</blockquote>") {
+		t.Fatalf("expected closing blockquote, got: %s", caption)
+	}
+}
+
+func TestBuildCaptionWithPrompt_EmptyPrompt(t *testing.T) {
+	caption := buildCaptionWithPrompt("🌐 Google 圖片", "")
+	if caption != "🌐 Google 圖片" {
+		t.Fatalf("expected label only when prompt is empty, got: %s", caption)
+	}
+}
+
+func TestBuildCaptionWithPrompt_HTMLEscape(t *testing.T) {
+	caption := buildCaptionWithPrompt("label", "<script>alert('xss')</script>")
+	if strings.Contains(caption, "<script>") {
+		t.Fatalf("expected HTML-escaped prompt, got: %s", caption)
+	}
+	if !strings.Contains(caption, "&lt;script&gt;") {
+		t.Fatalf("expected escaped angle brackets, got: %s", caption)
+	}
+}
+
+func TestBuildCaptionWithPrompt_LongPrompt(t *testing.T) {
+	longPrompt := strings.Repeat("a", 1000)
+	caption := buildCaptionWithPrompt("label", longPrompt)
+	// The prompt should be truncated to 900 chars + "..."
+	if len(caption) > 1024 {
+		t.Fatalf("caption exceeds 1024 chars: len=%d", len(caption))
+	}
+	if !strings.Contains(caption, "...") {
+		t.Fatalf("expected truncation indicator, got: %s", caption)
+	}
+}

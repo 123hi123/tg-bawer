@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -508,6 +509,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdErrors(msg)
 	case "state":
 		b.cmdState(msg)
+	case "addprompt":
+		b.cmdAddPrompt(msg)
 	}
 }
 
@@ -551,6 +554,7 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 /service - 服務管理（standard/custom/vertex）
 /errors - 查看最近錯誤記錄
 /state - 查看專案磁碟使用狀態
+/addprompt - 為過往回覆補上提示詞
 /help - 顯示幫助`
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
@@ -938,6 +942,50 @@ func (b *Bot) cmdState(msg *tgbotapi.Message) {
 	b.api.Send(reply)
 }
 
+// cmdAddPrompt retroactively edits all tracked bot reply messages in the
+// current chat to add the generation prompt as an expandable blockquote.
+func (b *Bot) cmdAddPrompt(msg *tgbotapi.Message) {
+	items, err := b.db.GetBotReplyPromptsByChat(msg.Chat.ID)
+	if err != nil {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 讀取記錄失敗："+err.Error())
+		b.api.Send(reply)
+		return
+	}
+
+	if len(items) == 0 {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "📝 此聊天室尚無已追蹤的回覆記錄。")
+		b.api.Send(reply)
+		return
+	}
+
+	successCount := 0
+	failCount := 0
+	for _, item := range items {
+		newCaption := buildCaptionWithPrompt(item.Caption, item.Prompt)
+
+		editCaption := tgbotapi.EditMessageCaptionConfig{
+			BaseEdit: tgbotapi.BaseEdit{
+				ChatID:    item.ChatID,
+				MessageID: item.MessageID,
+			},
+			Caption:   newCaption,
+			ParseMode: "HTML",
+		}
+		if _, err := b.api.Send(editCaption); err != nil {
+			log.Printf("編輯訊息失敗 (chat=%d, msg=%d): %v", item.ChatID, item.MessageID, err)
+			failCount++
+		} else {
+			successCount++
+		}
+		// Telegram API rate limit: avoid hitting it too aggressively
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID,
+		fmt.Sprintf("✅ 已完成補上提示詞\n\n成功：%d 則\n失敗：%d 則", successCount, failCount))
+	b.api.Send(reply)
+}
+
 func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 	data := callback.Data
 	parts := strings.SplitN(data, ":", 2)
@@ -1168,6 +1216,21 @@ func truncateError(err string) string {
 		return err[:maxLen] + "...\n(錯誤訊息過長已截斷)"
 	}
 	return err
+}
+
+// buildCaptionWithPrompt builds an HTML caption that includes the label and
+// the generation prompt inside a Telegram expandable blockquote.
+func buildCaptionWithPrompt(label, prompt string) string {
+	if prompt == "" {
+		return label
+	}
+	escaped := html.EscapeString(prompt)
+	// Telegram caption limit is 1024 characters; leave room for label + HTML tags.
+	const maxPromptLen = 900
+	if len(escaped) > maxPromptLen {
+		escaped = escaped[:maxPromptLen] + "..."
+	}
+	return fmt.Sprintf("%s\n\n<blockquote expandable>%s</blockquote>", html.EscapeString(label), escaped)
 }
 
 // noServiceSetupText is the tutorial text shown when a user has no configured services.
@@ -2029,8 +2092,11 @@ func (b *Bot) tryGenerateVideo(chatID int64, replyToMessageID int, prompt string
 	// Upload video to TG
 	videoMsg := tgbotapi.NewVideo(chatID, tgbotapi.FileBytes{Name: "generated.mp4", Bytes: videoResult.VideoData})
 	videoMsg.ReplyToMessageID = replyToMessageID
-	videoMsg.Caption = "🎬 AI 生成影片"
-	if _, err := b.api.Send(videoMsg); err != nil {
+	videoMsg.Caption = buildCaptionWithPrompt("🎬 AI 生成影片", prompt)
+	videoMsg.ParseMode = "HTML"
+	if sentMsg, err := b.api.Send(videoMsg); err != nil {
 		log.Printf("上傳影片失敗: %v", err)
+	} else {
+		b.db.SaveBotReplyPrompt(chatID, sentMsg.MessageID, prompt, "🎬 AI 生成影片", "video")
 	}
 }
