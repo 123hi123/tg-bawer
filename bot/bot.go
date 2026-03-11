@@ -91,6 +91,8 @@ type Bot struct {
 	errorLog      []errorLogEntry
 	errorLogMu    sync.Mutex
 	activeRetries int32 // atomic counter for currently retrying tasks
+	rateLimiter   *rateLimiter
+	adminUserID   int64
 }
 
 // userImageQueueCache is an in-memory cache for per-user image queues with expiration.
@@ -139,6 +141,8 @@ func NewBot(cfg *config.Config, db *database.Database) (*Bot, error) {
 		msgPhotos: &msgPhotoCache{
 			entries: make(map[string]*cachedMsgPhoto),
 		},
+		rateLimiter: newRateLimiter(),
+		adminUserID: cfg.AdminUserID,
 	}
 
 	// 啟動清理過期快取的 goroutine
@@ -511,6 +515,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdState(msg)
 	case "addprompt":
 		b.cmdAddPrompt(msg)
+	case "vip":
+		b.cmdVIP(msg)
 	}
 }
 
@@ -834,9 +840,148 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "service", Description: "管理 AI 服務（新增/切換/刪除）"},
 		tgbotapi.BotCommand{Command: "errors", Description: "查看最近的錯誤記錄"},
 		tgbotapi.BotCommand{Command: "state", Description: "查看磁碟、重試佇列與資源使用狀態"},
+		tgbotapi.BotCommand{Command: "vip", Description: "管理 VIP 使用者（僅管理員）"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
 		log.Printf("註冊斜線指令失敗: %v", err)
+	}
+}
+
+// checkAndRecordRateLimit 檢查使用者速率限制，若通過則記錄請求。
+// 管理員和 VIP 使用者不受限制。
+// 返回 true 表示允許繼續處理，false 表示已被限制（已回覆提示訊息）。
+func (b *Bot) checkAndRecordRateLimit(msg *tgbotapi.Message) bool {
+	userID := msg.From.ID
+
+	// 管理員不受限制
+	if b.adminUserID != 0 && userID == b.adminUserID {
+		return true
+	}
+
+	// VIP 不受限制
+	isVIP, err := b.db.IsVIPUser(userID)
+	if err != nil {
+		log.Printf("[速率限制] 查詢 VIP 狀態失敗 (userID=%d): %v，跳過限制", userID, err)
+		return true
+	}
+	if isVIP {
+		return true
+	}
+
+	allowed, retryAfter, overLimit := b.rateLimiter.CheckRateLimit(userID)
+	if !allowed {
+		var replyText string
+		if overLimit {
+			mins := int(retryAfter.Minutes())
+			secs := int(retryAfter.Seconds()) % 60
+			replyText = fmt.Sprintf("⏳ 已達使用上限，每 15 分鐘可使用一次（剩餘 %d 分 %d 秒）", mins, secs)
+		} else {
+			secs := int(retryAfter.Seconds())
+			replyText = fmt.Sprintf("⏳ 請求過於頻繁，請稍後再試（剩餘 %d 秒）", secs)
+		}
+		reply := tgbotapi.NewMessage(msg.Chat.ID, replyText)
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+		return false
+	}
+
+	b.rateLimiter.RecordRequest(userID)
+	return true
+}
+
+// cmdVIP 處理 /vip 指令（僅管理員可用）
+func (b *Bot) cmdVIP(msg *tgbotapi.Message) {
+	if b.adminUserID == 0 || msg.From.ID != b.adminUserID {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 此指令僅限管理員使用")
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+		return
+	}
+
+	args := strings.Fields(msg.CommandArguments())
+	if len(args) == 0 {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "用法：\n/vip add <userID>\n/vip remove <userID>\n/vip list")
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+		return
+	}
+
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			reply := tgbotapi.NewMessage(msg.Chat.ID, "用法：/vip add <userID>")
+			reply.ReplyToMessageID = msg.MessageID
+			b.api.Send(reply)
+			return
+		}
+		var targetID int64
+		if _, err := fmt.Sscanf(args[1], "%d", &targetID); err != nil || targetID <= 0 {
+			reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 無效的 userID")
+			reply.ReplyToMessageID = msg.MessageID
+			b.api.Send(reply)
+			return
+		}
+		if err := b.db.AddVIPUser(targetID); err != nil {
+			reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("❌ 操作失敗：%v", err))
+			reply.ReplyToMessageID = msg.MessageID
+			b.api.Send(reply)
+			return
+		}
+		reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ 已將使用者 %d 設為 VIP", targetID))
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+
+	case "remove":
+		if len(args) < 2 {
+			reply := tgbotapi.NewMessage(msg.Chat.ID, "用法：/vip remove <userID>")
+			reply.ReplyToMessageID = msg.MessageID
+			b.api.Send(reply)
+			return
+		}
+		var targetID int64
+		if _, err := fmt.Sscanf(args[1], "%d", &targetID); err != nil || targetID <= 0 {
+			reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 無效的 userID")
+			reply.ReplyToMessageID = msg.MessageID
+			b.api.Send(reply)
+			return
+		}
+		if err := b.db.RemoveVIPUser(targetID); err != nil {
+			reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("❌ 操作失敗：%v", err))
+			reply.ReplyToMessageID = msg.MessageID
+			b.api.Send(reply)
+			return
+		}
+		reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ 已取消使用者 %d 的 VIP 身分", targetID))
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+
+	case "list":
+		users, err := b.db.GetAllVIPUsers()
+		if err != nil {
+			reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("❌ 查詢失敗：%v", err))
+			reply.ReplyToMessageID = msg.MessageID
+			b.api.Send(reply)
+			return
+		}
+		if len(users) == 0 {
+			reply := tgbotapi.NewMessage(msg.Chat.ID, "目前沒有 VIP 使用者")
+			reply.ReplyToMessageID = msg.MessageID
+			b.api.Send(reply)
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString("🌟 VIP 使用者清單：\n")
+		for _, uid := range users {
+			sb.WriteString(fmt.Sprintf("• %d\n", uid))
+		}
+		reply := tgbotapi.NewMessage(msg.Chat.ID, sb.String())
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+
+	default:
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "用法：\n/vip add <userID>\n/vip remove <userID>\n/vip list")
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
 	}
 }
 
@@ -1297,6 +1442,11 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 		return
 	}
 
+	// 速率限制檢查
+	if !b.checkAndRecordRateLimit(msg) {
+		return
+	}
+
 	allServices, _ := b.resolveAllServiceConfigs(msg.From.ID)
 	if len(allServices) == 0 && !b.grokClient.Available() {
 		reply := tgbotapi.NewMessage(msg.Chat.ID, noServiceSetupText)
@@ -1515,6 +1665,11 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 		return
 	}
 
+	// 速率限制檢查
+	if !b.checkAndRecordRateLimit(msg) {
+		return
+	}
+
 	allServices, _ := b.resolveAllServiceConfigs(msg.From.ID)
 	if len(allServices) == 0 && !b.grokClient.Available() {
 		reply := tgbotapi.NewMessage(msg.Chat.ID, noServiceSetupText)
@@ -1682,6 +1837,11 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 		reply.ParseMode = "Markdown"
 		reply.ReplyToMessageID = msg.MessageID
 		b.api.Send(reply)
+		return
+	}
+
+	// 速率限制檢查
+	if !b.checkAndRecordRateLimit(msg) {
 		return
 	}
 

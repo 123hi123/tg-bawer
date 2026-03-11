@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 )
 
 type Config struct {
@@ -17,6 +18,9 @@ type Config struct {
 	GrokImgModel  string // image generation model (default: grok-imagine-1.0)
 	GrokEditModel string // image editing model (default: grok-imagine-1.0-edit)
 	GrokVideoModel string // video generation model (default: grok-imagine-1.0-video)
+
+	// Admin settings
+	AdminUserID int64 // Telegram User ID of the admin
 }
 
 // 預設的翻譯 Prompt
@@ -41,12 +45,23 @@ func LoadConfig() *Config {
 		GrokImgModel:   getEnv("GROK_IMG_MODEL", "grok-imagine-1.0"),
 		GrokEditModel:  getEnv("GROK_EDIT_MODEL", "grok-imagine-1.0-edit"),
 		GrokVideoModel: getEnv("GROK_VIDEO_MODEL", "grok-imagine-1.0-video"),
+
+		AdminUserID: getEnvInt64("ADMIN_USER_ID", 0),
 	}
 }
 
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return defaultValue
+}
+
+func getEnvInt64(key string, defaultValue int64) int64 {
+	if value := os.Getenv(key); value != "" {
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return n
+		}
 	}
 	return defaultValue
 }

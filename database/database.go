@@ -211,6 +211,17 @@ func (d *Database) init() error {
 
 	d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_bot_reply_prompts_chat ON bot_reply_prompts(chat_id)`)
 
+	// 建立 VIP 使用者表
+	_, err = d.db.Exec(`
+		CREATE TABLE IF NOT EXISTS vip_users (
+			user_id INTEGER PRIMARY KEY,
+			added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -911,4 +922,45 @@ func (d *Database) GetAllBotReplyPrompts() ([]BotReplyPrompt, error) {
 func (d *Database) DeleteBotReplyPrompt(id int64) error {
 	_, err := d.db.Exec(`DELETE FROM bot_reply_prompts WHERE id = ?`, id)
 	return err
+}
+
+// AddVIPUser 將使用者設為 VIP
+func (d *Database) AddVIPUser(userID int64) error {
+	_, err := d.db.Exec(`INSERT OR IGNORE INTO vip_users (user_id) VALUES (?)`, userID)
+	return err
+}
+
+// RemoveVIPUser 取消使用者的 VIP 身分
+func (d *Database) RemoveVIPUser(userID int64) error {
+	_, err := d.db.Exec(`DELETE FROM vip_users WHERE user_id = ?`, userID)
+	return err
+}
+
+// IsVIPUser 回傳使用者是否為 VIP
+func (d *Database) IsVIPUser(userID int64) (bool, error) {
+	var count int
+	err := d.db.QueryRow(`SELECT COUNT(*) FROM vip_users WHERE user_id = ?`, userID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// GetAllVIPUsers 回傳所有 VIP 使用者的 ID 列表
+func (d *Database) GetAllVIPUsers() ([]int64, error) {
+	rows, err := d.db.Query(`SELECT user_id FROM vip_users ORDER BY added_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []int64
+	for rows.Next() {
+		var userID int64
+		if err := rows.Scan(&userID); err != nil {
+			return nil, err
+		}
+		users = append(users, userID)
+	}
+	return users, nil
 }
